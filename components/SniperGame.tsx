@@ -711,6 +711,7 @@ export default function SniperGame() {
                       }}
                     >
                       Collected codes
+                      {sortedRewards.length} | 238 328
                     </div>
                     <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13.5, color: COLORS.textMuted, marginTop: 4, lineHeight: 1.4 }}>
                       Sorted highest value first — uppercase outranks lowercase outranks digits, so ZZZ is as good as it gets.
