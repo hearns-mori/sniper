@@ -269,7 +269,7 @@ export default function PhaserShooter({
     let cancelled = false;
 
     (async () => {
-      const Phaser = (await import("phaser")).default;
+      const Phaser = await import("phaser");
       const { ShooterScene } = await import("@/lib/ShooterScene");
 
       if (cancelled || !canvasHostRef.current) return;
