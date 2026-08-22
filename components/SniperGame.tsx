@@ -56,9 +56,9 @@ const CATEGORY_ORDER: Category[] = [
   "army",
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REWARDS
-// ─────────────────────────────────────────────────────────────────────────────
+/* ==========================================================================
+   REWARDS
+   ========================================================================== */
 
 const REWARD_CHARS =
   "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -194,7 +194,7 @@ function saveRewards(rewards: RewardItem[]) {
       JSON.stringify(rewards)
     );
   } catch {
-    // Ignore storage errors.
+    // ignore
   }
 }
 
@@ -202,9 +202,8 @@ function loadRewardProgress(): RewardProgress | null {
   if (!isBrowser()) return null;
 
   try {
-    const raw = window.localStorage.getItem(
-      REWARD_PROGRESS_KEY
-    );
+    const raw =
+      window.localStorage.getItem(REWARD_PROGRESS_KEY);
 
     if (!raw) return null;
 
@@ -226,20 +225,30 @@ function saveRewardProgress(
         JSON.stringify(progress)
       );
     } else {
-      window.localStorage.removeItem(
-        REWARD_PROGRESS_KEY
-      );
+      window.localStorage.removeItem(REWARD_PROGRESS_KEY);
     }
   } catch {
-    // Ignore storage errors.
+    // ignore
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DATE / DAILY HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
+/* ==========================================================================
+   DAILY SCORE
+   ========================================================================== */
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+function isSameLocalDay(
+  ts: number,
+  referenceNow: number
+): boolean {
+  const a = new Date(ts);
+  const b = new Date(referenceNow);
+
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
 
 function startOfLocalDay(now: number): number {
   const d = new Date(now);
@@ -248,27 +257,6 @@ function startOfLocalDay(now: number): number {
 
   return d.getTime();
 }
-
-function isSameLocalDay(
-  timestamp: number,
-  referenceNow: number
-): boolean {
-  return (
-    startOfLocalDay(timestamp) ===
-    startOfLocalDay(referenceNow)
-  );
-}
-
-function addDays(
-  timestamp: number,
-  days: number
-): number {
-  return timestamp + days * DAY_MS;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DAILY KILL CALCULATIONS
-// ─────────────────────────────────────────────────────────────────────────────
 
 function computeTodayTotals(
   sessions: KillSession[],
@@ -287,255 +275,434 @@ function computeTodayTotals(
         now
       )
     ) {
-      totals[session.category] +=
-        session.kills;
+      totals[session.category] += session.kills;
     }
   }
 
   return totals;
 }
 
-function computeDailyKills(
-  sessions: KillSession[],
-  dayStart: number
-): number {
-  const dayEnd =
-    dayStart + DAY_MS;
+function getDayKey(ts: number): string {
+  const d = new Date(ts);
 
-  return sessions.reduce(
-    (total, session) => {
-      if (
-        session.startTime >= dayStart &&
-        session.startTime < dayEnd
-      ) {
-        return total + session.kills;
-      }
-
-      return total;
-    },
-    0
-  );
+  return `${d.getFullYear()}-${String(
+    d.getMonth() + 1
+  ).padStart(2, "0")}-${String(d.getDate()).padStart(
+    2,
+    "0"
+  )}`;
 }
 
-/**
- * Creates a map:
- *
- * local-day-start -> total kills that day
- *
- * This is used for historical leaderboard records.
- */
-function buildDailyKillsMap(
+interface DailyScore {
+  dayKey: string;
+  timestamp: number;
+  score: number;
+}
+
+function buildDailyScores(
   sessions: KillSession[]
-): Map<number, number> {
-  const map = new Map<
-    number,
-    number
-  >();
+): DailyScore[] {
+  const map = new Map<string, DailyScore>();
 
   for (const session of sessions) {
-    const day =
-      startOfLocalDay(
-        session.startTime
-      );
+    const dayKey = getDayKey(session.startTime);
 
-    map.set(
-      day,
-      (map.get(day) ?? 0) +
-        session.kills
-    );
-  }
+    const existing = map.get(dayKey);
 
-  return map;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HISTORICAL LEADERBOARD
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * IMPORTANT:
- *
- * Today's unfinished score is deliberately excluded.
- *
- * This means:
- *
- * Today = live "YOU"
- *
- * Historical records = completed days only
- *
- * Therefore a great day can beat PERSONAL BEST immediately
- * on the leaderboard without rewriting PERSONAL BEST during
- * the day.
- */
-
-function calculatePersonalBest(
-  sessions: KillSession[],
-  now: number
-): number {
-  const today =
-    startOfLocalDay(now);
-
-  const daily =
-    buildDailyKillsMap(sessions);
-
-  let best = 0;
-
-  for (const [
-    day,
-    kills,
-  ] of daily.entries()) {
-    if (day === today) continue;
-
-    best = Math.max(
-      best,
-      kills
-    );
-  }
-
-  return best;
-}
-
-function calculateRollingBest(
-  sessions: KillSession[],
-  now: number,
-  days: number
-): number {
-  const today =
-    startOfLocalDay(now);
-
-  const earliest =
-    addDays(
-      today,
-      -(days - 1)
-    );
-
-  const daily =
-    buildDailyKillsMap(sessions);
-
-  let best = 0;
-
-  for (const [
-    day,
-    kills,
-  ] of daily.entries()) {
-    // Never include today in historical records.
-    if (day === today) continue;
-
-    if (
-      day >= earliest &&
-      day < today
-    ) {
-      best = Math.max(
-        best,
-        kills
-      );
+    if (existing) {
+      existing.score += session.kills;
+    } else {
+      map.set(dayKey, {
+        dayKey,
+        timestamp: startOfLocalDay(
+          session.startTime
+        ),
+        score: session.kills,
+      });
     }
   }
 
-  return best;
-}
-
-function calculateYesterday(
-  sessions: KillSession[],
-  now: number
-): number {
-  const yesterday =
-    addDays(
-      startOfLocalDay(now),
-      -1
-    );
-
-  return computeDailyKills(
-    sessions,
-    yesterday
+  return [...map.values()].sort(
+    (a, b) => b.timestamp - a.timestamp
   );
 }
 
-function calculateThirtyDayAverage(
+/* ==========================================================================
+   IDEAL SELF
+   ==========================================================================
+
+   4 × 90 minutes
+   +
+   24 × 15 minutes
+   =
+   360 + 360
+   =
+   720 minutes
+   =
+   12 hours
+   ========================================================================== */
+
+const IDEAL_LONG_BLOCKS = 4;
+const IDEAL_LONG_MINUTES = 90;
+
+const IDEAL_SHORT_BLOCKS = 24;
+const IDEAL_SHORT_MINUTES = 15;
+
+const IDEAL_TOTAL_MINUTES =
+  IDEAL_LONG_BLOCKS * IDEAL_LONG_MINUTES +
+  IDEAL_SHORT_BLOCKS * IDEAL_SHORT_MINUTES;
+
+const IDEAL_SELF_SCORE =
+  IDEAL_LONG_BLOCKS *
+    calcKills(IDEAL_LONG_MINUTES * 60000) +
+  IDEAL_SHORT_BLOCKS *
+    calcKills(IDEAL_SHORT_MINUTES * 60000);
+
+/* ==========================================================================
+   SIX LEADERBOARD BENCHMARKS
+   ========================================================================== */
+
+type BenchmarkId =
+  | "personal"
+  | "sevenDay"
+  | "yesterday"
+  | "thirtyDay"
+  | "thirtyAverage"
+  | "ideal";
+
+interface Benchmark {
+  id: BenchmarkId;
+  name: string;
+  score: number;
+  color?: string;
+}
+
+/*
+ * IMPORTANT:
+ *
+ * Today's score is NEVER used to calculate:
+ *
+ * - Personal Best
+ * - 7-Day Best
+ * - Yesterday
+ * - 30-Day Best
+ * - 30-Day Average
+ *
+ * This means you can beat every benchmark TODAY without immediately
+ * rewriting your historical records.
+ */
+
+function getHistoricalBenchmarks(
   sessions: KillSession[],
   now: number
+): Benchmark[] {
+  const allDays = buildDailyScores(sessions);
+
+  const todayKey = getDayKey(now);
+
+  const completedDays = allDays.filter(
+    (day) => day.dayKey !== todayKey
+  );
+
+  const personalBest =
+    completedDays.length > 0
+      ? Math.max(
+          ...completedDays.map((d) => d.score)
+        )
+      : 0;
+
+  const sevenDayStart = startOfLocalDay(
+    now - 6 * 24 * 60 * 60 * 1000
+  );
+
+  const sevenDayDays = completedDays.filter(
+    (day) => day.timestamp >= sevenDayStart
+  );
+
+  const sevenDayBest =
+    sevenDayDays.length > 0
+      ? Math.max(
+          ...sevenDayDays.map((d) => d.score)
+        )
+      : 0;
+
+  const yesterdayDate = new Date(now);
+  yesterdayDate.setDate(
+    yesterdayDate.getDate() - 1
+  );
+
+  const yesterdayKey = getDayKey(
+    yesterdayDate.getTime()
+  );
+
+  const yesterday =
+    completedDays.find(
+      (d) => d.dayKey === yesterdayKey
+    )?.score ?? 0;
+
+  const thirtyDayStart = startOfLocalDay(
+    now - 29 * 24 * 60 * 60 * 1000
+  );
+
+  const thirtyDayDays = completedDays.filter(
+    (day) =>
+      day.timestamp >= thirtyDayStart
+  );
+
+  const thirtyDayBest =
+    thirtyDayDays.length > 0
+      ? Math.max(
+          ...thirtyDayDays.map(
+            (d) => d.score
+          )
+        )
+      : 0;
+
+  const thirtyDayAverage =
+    thirtyDayDays.length > 0
+      ? Math.round(
+          thirtyDayDays.reduce(
+            (sum, d) => sum + d.score,
+            0
+          ) / thirtyDayDays.length
+        )
+      : 0;
+
+  return [
+    {
+      id: "personal",
+      name: "PERSONAL BEST",
+      score: personalBest,
+      color: COLORS.chrome,
+    },
+    {
+      id: "sevenDay",
+      name: "7-DAY BEST",
+      score: sevenDayBest,
+      color: "#c7d0c6",
+    },
+    {
+      id: "yesterday",
+      name: "YESTERDAY",
+      score: yesterday,
+      color: "#b98a52",
+    },
+    {
+      id: "thirtyDay",
+      name: "30-DAY BEST",
+      score: thirtyDayBest,
+      color: "#d4d4d4",
+    },
+    {
+      id: "thirtyAverage",
+      name: "30-DAY AVG",
+      score: thirtyDayAverage,
+      color: "#9ca89d",
+    },
+    {
+      id: "ideal",
+      name: "IDEAL SELF",
+      score: IDEAL_SELF_SCORE,
+      color: "#b9f2ff",
+    },
+  ];
+}
+
+/* ==========================================================================
+   RANDOMIZED 6AM → 10PM SCORE PROGRESSION
+   ========================================================================== */
+
+const LEADERBOARD_START_HOUR = 6;
+const LEADERBOARD_END_HOUR = 22;
+
+/*
+ * Deterministic pseudo-random number.
+ *
+ * Same benchmark + same day = same progression.
+ *
+ * This gives randomized-looking movement without making the leaderboard
+ * jump randomly backward and forward.
+ */
+function hash01(str: string): number {
+  let h = 2166136261;
+
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+
+  return (
+    (h >>> 0) / 4294967295
+  );
+}
+
+/*
+ * Creates a smooth but randomized monotonic curve.
+ *
+ * The curve is built from multiple random weighted segments.
+ * Therefore:
+ *
+ * 06:00 → near 0
+ * 22:00 → 100%
+ *
+ * but the increase is NOT linear.
+ */
+function randomizedProgress(
+  fraction: number,
+  seed: string
 ): number {
-  const today =
-    startOfLocalDay(now);
+  const clamped = Math.max(
+    0,
+    Math.min(1, fraction)
+  );
 
-  /*
-   * Average of the previous 30 COMPLETED
-   * calendar days.
-   *
-   * Today is intentionally excluded.
-   */
-  let total = 0;
+  if (clamped <= 0) return 0;
+  if (clamped >= 1) return 1;
 
-  for (let i = 1; i <= 30; i++) {
-    const day =
-      addDays(
-        today,
-        -i
-      );
+  const SEGMENTS = 32;
 
-    total += computeDailyKills(
-      sessions,
-      day
+  const weights: number[] = [];
+
+  for (let i = 0; i < SEGMENTS; i++) {
+    const random =
+      hash01(`${seed}:segment:${i}`);
+
+    /*
+     * Prevent extremely tiny segments while still
+     * producing strong variation.
+     */
+    weights.push(
+      0.35 + random * 1.65
     );
   }
 
+  const total = weights.reduce(
+    (a, b) => a + b,
+    0
+  );
+
+  let target = clamped * total;
+  let accumulated = 0;
+
+  for (let i = 0; i < SEGMENTS; i++) {
+    const weight = weights[i];
+
+    if (
+      accumulated + weight >=
+      target
+    ) {
+      const local =
+        (target - accumulated) /
+        weight;
+
+      const segmentStart =
+        i / SEGMENTS;
+
+      const segmentEnd =
+        (i + 1) / SEGMENTS;
+
+      const raw =
+        segmentStart +
+        local *
+          (segmentEnd -
+            segmentStart);
+
+      /*
+       * Mild easing keeps it natural while
+       * retaining the randomized shape.
+       */
+      return (
+        raw * raw *
+        (3 - 2 * raw)
+      );
+    }
+
+    accumulated += weight;
+  }
+
+  return 1;
+}
+
+function leaderboardDayFraction(
+  now: number
+): number {
+  const d = new Date(now);
+
+  const start = new Date(d);
+  start.setHours(
+    LEADERBOARD_START_HOUR,
+    0,
+    0,
+    0
+  );
+
+  const end = new Date(d);
+  end.setHours(
+    LEADERBOARD_END_HOUR,
+    0,
+    0,
+    0
+  );
+
+  const total =
+    end.getTime() -
+    start.getTime();
+
+  const elapsed =
+    now - start.getTime();
+
+  if (elapsed <= 0) return 0;
+  if (elapsed >= total) return 1;
+
+  return elapsed / total;
+}
+
+/*
+ * The six benchmark scores progress toward their historical/reference
+ * values from 06:00 to 22:00.
+ *
+ * This does NOT modify the underlying historical records.
+ */
+function getLiveBenchmarkScore(
+  benchmark: Benchmark,
+  now: number
+): number {
+  if (benchmark.score <= 0) {
+    return 0;
+  }
+
+  const dayKey = getDayKey(now);
+
+  const fraction =
+    leaderboardDayFraction(now);
+
+  const progress =
+    randomizedProgress(
+      fraction,
+      `${dayKey}:${benchmark.id}`
+    );
+
   return Math.round(
-    total / 30
+    benchmark.score * progress
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// IDEAL SELF
-// ─────────────────────────────────────────────────────────────────────────────
-
-const IDEAL_90_MIN_BLOCKS = 4;
-const IDEAL_15_MIN_BLOCKS = 24;
-
-const IDEAL_TOTAL_MINUTES =
-  IDEAL_90_MIN_BLOCKS * 90 +
-  IDEAL_15_MIN_BLOCKS * 15;
-
-// 4 × 90m + 24 × 15m = 720m = 12h
-const IDEAL_SELF_KILLS =
-  IDEAL_90_MIN_BLOCKS *
-    calcKills(90 * 60 * 1000) +
-  IDEAL_15_MIN_BLOCKS *
-    calcKills(15 * 60 * 1000);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LEADERBOARD TYPES
-// ─────────────────────────────────────────────────────────────────────────────
+/* ==========================================================================
+   LEADERBOARD TYPES
+   ========================================================================== */
 
 interface LeaderboardEntry {
   id: string;
   name: string;
-  subtitle: string;
   kills: number;
-  isYou?: boolean;
-  isIdeal?: boolean;
+  isYou: boolean;
+  benchmark?: BenchmarkId;
+  color?: string;
 }
 
-function rankColor(
-  rank: number
-): string {
-  if (rank === 1) {
-    return COLORS.chrome;
-  }
-
-  if (rank === 2) {
-    return "#c7d0c6";
-  }
-
-  if (rank === 3) {
-    return "#b98a52";
-  }
-
-  return COLORS.textMuted;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TABS
-// ─────────────────────────────────────────────────────────────────────────────
+/* ==========================================================================
+   TABS
+   ========================================================================== */
 
 const TABS: {
   id: SubScreen;
@@ -559,9 +726,17 @@ const TABS: {
   },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// COMPONENT
-// ─────────────────────────────────────────────────────────────────────────────
+function rankColor(rank: number): string {
+  if (rank === 1) return COLORS.chrome;
+  if (rank === 2) return "#c7d0c6";
+  if (rank === 3) return "#b98a52";
+
+  return COLORS.textMuted;
+}
+
+/* ==========================================================================
+   COMPONENT
+   ========================================================================== */
 
 export default function SniperGame() {
   const [ready, setReady] =
@@ -592,9 +767,7 @@ export default function SniperGame() {
     useState(0);
 
   const [result, setResult] =
-    useState<ResultData | null>(
-      null
-    );
+    useState<ResultData | null>(null);
 
   const [rewards, setRewards] =
     useState<RewardItem[]>([]);
@@ -612,9 +785,9 @@ export default function SniperGame() {
       null
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // REWARDS
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     REWARD MINUTES
+     ------------------------------------------------------------------------ */
 
   const grantMinuteRewards =
     useCallback(
@@ -643,35 +816,32 @@ export default function SniperGame() {
           [];
 
         for (
-          let minute =
+          let m =
             progress.lastMinute + 1;
-          minute <=
-          currentMinute;
-          minute++
+          m <= currentMinute;
+          m++
         ) {
           minted.push({
-            id: `${progress.startTime}-${minute}`,
+            id: `${progress.startTime}-${m}`,
             code:
               generateRewardCode(),
             category,
             earnedAt:
               progress.startTime +
-              minute * 60000,
+              m * 60000,
           });
         }
 
-        setRewards(
-          (previous) => {
-            const next = [
-              ...minted,
-              ...previous,
-            ];
+        setRewards((prev) => {
+          const next = [
+            ...minted,
+            ...prev,
+          ];
 
-            saveRewards(next);
+          saveRewards(next);
 
-            return next;
-          }
-        );
+          return next;
+        });
 
         const updated: RewardProgress =
           {
@@ -691,38 +861,26 @@ export default function SniperGame() {
       []
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // INITIAL LOAD
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     LOAD
+     ------------------------------------------------------------------------ */
 
   useEffect(() => {
-    setGameState(
-      loadState()
-    );
-
-    setRewards(
-      loadRewards()
-    );
+    setGameState(loadState());
+    setRewards(loadRewards());
 
     const activeSession =
       loadActiveSession();
 
     if (activeSession) {
-      setActive(
-        activeSession
-      );
+      setActive(activeSession);
 
       const elapsed =
         Date.now() -
         activeSession.startTime;
 
-      setElapsedMs(
-        elapsed
-      );
-
-      setScreen(
-        "active"
-      );
+      setElapsedMs(elapsed);
+      setScreen("active");
 
       const storedProgress =
         loadRewardProgress();
@@ -756,18 +914,16 @@ export default function SniperGame() {
     grantMinuteRewards,
   ]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ACTIVE TIMER
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     ACTIVE TIMER
+     ------------------------------------------------------------------------ */
 
   useEffect(() => {
     if (
       screen !== "active" ||
       !active
     ) {
-      if (
-        intervalRef.current
-      ) {
+      if (intervalRef.current) {
         clearInterval(
           intervalRef.current
         );
@@ -781,9 +937,7 @@ export default function SniperGame() {
         Date.now() -
         active.startTime;
 
-      setElapsedMs(
-        elapsed
-      );
+      setElapsedMs(elapsed);
 
       grantMinuteRewards(
         elapsed,
@@ -794,10 +948,7 @@ export default function SniperGame() {
     tick();
 
     intervalRef.current =
-      setInterval(
-        tick,
-        1000
-      );
+      setInterval(tick, 1000);
 
     const onVisible = () => {
       if (
@@ -819,9 +970,7 @@ export default function SniperGame() {
     );
 
     return () => {
-      if (
-        intervalRef.current
-      ) {
+      if (intervalRef.current) {
         clearInterval(
           intervalRef.current
         );
@@ -843,50 +992,40 @@ export default function SniperGame() {
     grantMinuteRewards,
   ]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // HEARTBEAT
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     LEADERBOARD REFRESH
+     ------------------------------------------------------------------------ */
 
   useEffect(() => {
-    const id =
-      setInterval(() => {
-        setHeartbeat(
-          (value) =>
-            value + 1
-        );
-      }, 30000);
+    const id = setInterval(() => {
+      setHeartbeat(
+        (h) => h + 1
+      );
+    }, 30000);
 
     return () =>
       clearInterval(id);
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // START SESSION
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     START
+     ------------------------------------------------------------------------ */
 
   const startSession =
     useCallback(
-      (
-        category: Category
-      ) => {
+      (category: Category) => {
         const session: ActiveSession =
           {
             category,
-            startTime:
-              Date.now(),
+            startTime: Date.now(),
           };
 
         saveActiveSession(
           session
         );
 
-        setActive(
-          session
-        );
-
-        setElapsedMs(
-          0
-        );
+        setActive(session);
+        setElapsedMs(0);
 
         const progress: RewardProgress =
           {
@@ -902,26 +1041,21 @@ export default function SniperGame() {
           progress
         );
 
-        setScreen(
-          "active"
-        );
+        setScreen("active");
       },
       []
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // END SESSION
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     END
+     ------------------------------------------------------------------------ */
 
   const endSession =
     useCallback(() => {
       if (!active) return;
 
-      const endTime =
-        Date.now();
-
       const finalElapsed =
-        endTime -
+        Date.now() -
         active.startTime;
 
       grantMinuteRewards(
@@ -930,69 +1064,55 @@ export default function SniperGame() {
       );
 
       const kills =
-        calcKills(
-          finalElapsed
-        );
+        calcKills(finalElapsed);
 
       const rate =
-        calcRate(
-          finalElapsed
-        );
+        calcRate(finalElapsed);
 
       const record: KillSession =
         {
-          id: `${active.startTime}-${endTime}`,
+          id: `${active.startTime}-${Date.now()}`,
           category:
             active.category,
           startTime:
             active.startTime,
-          endTime,
+          endTime: Date.now(),
           durationMs:
             finalElapsed,
           kills,
           rate,
         };
 
-      setGameState(
-        (previous) => {
-          const next: GameState =
-            {
-              totals: {
-                ...previous.totals,
-                [active.category]:
-                  previous.totals[
-                    active.category
-                  ] + kills,
-              },
+      setGameState((prev) => {
+        const next: GameState =
+          {
+            totals: {
+              ...prev.totals,
+              [active.category]:
+                prev.totals[
+                  active.category
+                ] + kills,
+            },
 
-              sessions: [
-                record,
-                ...previous.sessions,
-              ],
-            };
+            sessions: [
+              record,
+              ...prev.sessions,
+            ],
+          };
 
-          saveState(
-            next
-          );
+        saveState(next);
 
-          return next;
-        }
-      );
+        return next;
+      });
 
-      saveActiveSession(
-        null
-      );
+      saveActiveSession(null);
 
       rewardProgressRef.current =
         null;
 
-      saveRewardProgress(
-        null
-      );
+      saveRewardProgress(null);
 
-      setActive(
-        null
-      );
+      setActive(null);
 
       setResult({
         category:
@@ -1003,17 +1123,15 @@ export default function SniperGame() {
           finalElapsed,
       });
 
-      setScreen(
-        "result"
-      );
+      setScreen("result");
     }, [
       active,
       grantMinuteRewards,
     ]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ABORT
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     ABORT
+     ------------------------------------------------------------------------ */
 
   const abortSession =
     useCallback(() => {
@@ -1025,74 +1143,55 @@ export default function SniperGame() {
         );
       }
 
-      saveActiveSession(
-        null
-      );
+      saveActiveSession(null);
 
       rewardProgressRef.current =
         null;
 
-      saveRewardProgress(
-        null
-      );
+      saveRewardProgress(null);
 
-      setActive(
-        null
-      );
+      setActive(null);
 
-      setScreen(
-        "home"
-      );
+      setScreen("home");
     }, [
       active,
       grantMinuteRewards,
     ]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RESULT
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     RESULT
+     ------------------------------------------------------------------------ */
 
   const closeResult =
     useCallback(() => {
-      setResult(
-        null
-      );
-
-      setScreen(
-        "home"
-      );
+      setResult(null);
+      setScreen("home");
     }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DELETE REWARD
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     DELETE REWARD
+     ------------------------------------------------------------------------ */
 
   const deleteReward =
     useCallback(
       (id: string) => {
-        setRewards(
-          (previous) => {
-            const next =
-              previous.filter(
-                (reward) =>
-                  reward.id !==
-                  id
-              );
-
-            saveRewards(
-              next
+        setRewards((prev) => {
+          const next =
+            prev.filter(
+              (r) => r.id !== id
             );
 
-            return next;
-          }
-        );
+          saveRewards(next);
+
+          return next;
+        });
       },
       []
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RESET
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ------------------------------------------------------------------------
+     RESET
+     ------------------------------------------------------------------------ */
 
   const handleReset =
     useCallback(() => {
@@ -1110,9 +1209,7 @@ export default function SniperGame() {
 
       saveRewards([]);
 
-      saveRewardProgress(
-        null
-      );
+      saveRewardProgress(null);
 
       setGameState({
         totals: {
@@ -1128,22 +1225,16 @@ export default function SniperGame() {
       rewardProgressRef.current =
         null;
 
-      setActive(
-        null
-      );
+      setActive(null);
 
-      setSubScreen(
-        "base"
-      );
+      setSubScreen("base");
 
-      setScreen(
-        "home"
-      );
+      setScreen("home");
     }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // TODAY
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ==========================================================================
+     DERIVED DATA
+     ========================================================================== */
 
   const now = Date.now();
 
@@ -1160,246 +1251,130 @@ export default function SniperGame() {
 
   const todaySessions =
     gameState.sessions.filter(
-      (session) =>
+      (s) =>
         isSameLocalDay(
-          session.startTime,
+          s.startTime,
           now
         )
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DYNAMIC LEADERBOARD
-  // ─────────────────────────────────────────────────────────────────────────
-
-  const leaderboard =
+  /*
+   * SIX BENCHMARKS
+   *
+   * These are calculated BEFORE today's score.
+   *
+   * Therefore YOU can beat them today without rewriting
+   * historical records immediately.
+   */
+  const benchmarks =
     useMemo(
-      () => {
-        /*
-         * Historical benchmarks intentionally exclude TODAY.
-         *
-         * Therefore:
-         *
-         * YOU = live today
-         *
-         * PERSONAL BEST =
-         * highest completed day
-         *
-         * 30-DAY BEST =
-         * highest completed day in previous 30 days
-         *
-         * 7-DAY BEST =
-         * highest completed day in previous 7 days
-         *
-         * YESTERDAY =
-         * previous completed day
-         *
-         * 30-DAY AVG =
-         * previous 30 completed days
-         *
-         * IDEAL SELF =
-         * theoretical target
-         */
-
-        const personalBest =
-          calculatePersonalBest(
-            gameState.sessions,
-            now
-          );
-
-        const thirtyDayBest =
-          calculateRollingBest(
-            gameState.sessions,
-            now,
-            30
-          );
-
-        const sevenDayBest =
-          calculateRollingBest(
-            gameState.sessions,
-            now,
-            7
-          );
-
-        const yesterday =
-          calculateYesterday(
-            gameState.sessions,
-            now
-          );
-
-        const thirtyDayAverage =
-          calculateThirtyDayAverage(
-            gameState.sessions,
-            now
-          );
-
-        const entries: LeaderboardEntry[] =
-          [
-            {
-              id: "you",
-              name: "YOU",
-              subtitle:
-                "Current day",
-              kills: todaySum,
-              isYou: true,
-            },
-
-            {
-              id: "ideal",
-              name: "IDEAL SELF",
-              subtitle:
-                "4 × 90m + 24 × 15m · 12h",
-              kills:
-                IDEAL_SELF_KILLS,
-              isIdeal: true,
-            },
-
-            {
-              id: "personal-best",
-              name:
-                "PERSONAL BEST",
-              subtitle:
-                "Highest completed day",
-              kills:
-                personalBest,
-            },
-
-            {
-              id: "30-day-best",
-              name:
-                "30-DAY BEST",
-              subtitle:
-                "Highest completed day · 30d",
-              kills:
-                thirtyDayBest,
-            },
-
-            {
-              id: "7-day-best",
-              name:
-                "7-DAY BEST",
-              subtitle:
-                "Highest completed day · 7d",
-              kills:
-                sevenDayBest,
-            },
-
-            {
-              id: "yesterday",
-              name:
-                "YESTERDAY",
-              subtitle:
-                "Previous completed day",
-              kills:
-                yesterday,
-            },
-
-            {
-              id: "30-day-average",
-              name:
-                "30-DAY AVG",
-              subtitle:
-                "Average completed day · 30d",
-              kills:
-                thirtyDayAverage,
-            },
-          ];
-
-        /*
-         * THE IMPORTANT PART:
-         *
-         * The seven slots are now sorted purely by score.
-         *
-         * If YOU = 1000 and IDEAL SELF = 900:
-         *
-         * 1 YOU
-         * 2 IDEAL SELF
-         * ...
-         *
-         * Today's score does NOT modify any historical record.
-         */
-        return entries.sort(
-          (a, b) => {
-            if (
-              b.kills !== a.kills
-            ) {
-              return (
-                b.kills -
-                a.kills
-              );
-            }
-
-            /*
-             * Deterministic tie-breaking.
-             *
-             * YOU wins ties against
-             * historical benchmarks.
-             */
-            if (
-              a.isYou &&
-              !b.isYou
-            ) {
-              return -1;
-            }
-
-            if (
-              b.isYou &&
-              !a.isYou
-            ) {
-              return 1;
-            }
-
-            /*
-             * IDEAL wins ties against
-             * ordinary historical
-             * benchmarks.
-             */
-            if (
-              a.isIdeal &&
-              !b.isIdeal
-            ) {
-              return -1;
-            }
-
-            if (
-              b.isIdeal &&
-              !a.isIdeal
-            ) {
-              return 1;
-            }
-
-            return 0;
-          }
-        );
-      },
-      [
-        gameState.sessions,
-        todaySum,
-        heartbeat,
-      ]
+      () =>
+        getHistoricalBenchmarks(
+          gameState.sessions,
+          now
+        ),
+      [gameState.sessions, now, heartbeat]
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // REWARDS SORTING
-  // ─────────────────────────────────────────────────────────────────────────
+  /*
+   * LIVE LEADERBOARD
+   *
+   * Six benchmark scores progress from 06:00 → 22:00.
+   * YOU uses the actual current score.
+   */
+  const leaderboard =
+    useMemo(() => {
+      const benchmarkEntries: LeaderboardEntry[] =
+        benchmarks.map(
+          (benchmark) => ({
+            id: benchmark.id,
+            name: benchmark.name,
+            kills:
+              getLiveBenchmarkScore(
+                benchmark,
+                now
+              ),
+            isYou: false,
+            benchmark:
+              benchmark.id,
+            color:
+              benchmark.color,
+          })
+        );
+
+      const entries: LeaderboardEntry[] =
+        [
+          {
+            id: "you",
+            name: "YOU",
+            kills: todaySum,
+            isYou: true,
+            color:
+              COLORS.chrome,
+          },
+          ...benchmarkEntries,
+        ];
+
+      /*
+       * HIGHEST → LOWEST
+       *
+       * YOU is NOT forced to a specific position.
+       *
+       * If today's score is the highest,
+       * YOU becomes rank #1 immediately.
+       */
+      return entries.sort(
+        (a, b) => {
+          if (
+            b.kills !== a.kills
+          ) {
+            return (
+              b.kills - a.kills
+            );
+          }
+
+          /*
+           * If scores tie, YOU wins the
+           * current-day tie.
+           */
+          if (
+            a.isYou &&
+            !b.isYou
+          ) {
+            return -1;
+          }
+
+          if (
+            !a.isYou &&
+            b.isYou
+          ) {
+            return 1;
+          }
+
+          return 0;
+        }
+      );
+    }, [
+      benchmarks,
+      todaySum,
+      now,
+      heartbeat,
+    ]);
 
   const sortedRewards =
     useMemo(
       () =>
         [...rewards].sort(
           (a, b) =>
-            rewardValue(
-              b.code
-            ) -
-            rewardValue(
-              a.code
-            )
+            rewardValue(b.code) -
+            rewardValue(a.code)
         ),
       [rewards]
     );
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // LOADING
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ==========================================================================
+     LOADING
+     ========================================================================== */
 
   if (!ready) {
     return (
@@ -1407,44 +1382,34 @@ export default function SniperGame() {
         className="app-shell"
         style={{
           display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
+          alignItems: "center",
+          justifyContent: "center",
           background:
             COLORS.void,
         }}
       >
         <Crosshair
           size={26}
-          color={
-            COLORS.chrome
-          }
+          color={COLORS.chrome}
         />
       </div>
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // UI
-  // ─────────────────────────────────────────────────────────────────────────
+  /* ==========================================================================
+     UI
+     ========================================================================== */
 
   return (
     <div
       style={{
         background:
           "radial-gradient(ellipse at center, #10130f 0%, #0b0d0c 72%)",
-        color:
-          COLORS.text,
+        color: COLORS.text,
         maxWidth: 480,
-        minHeight:
-          "100vh",
-        margin:
-          "0 auto",
-        position:
-          "relative",
-        overflowX:
-          "hidden",
+        margin: "0 auto",
+        position: "relative",
+        overflowX: "hidden",
       }}
     >
       {/* HUD CORNERS */}
@@ -1474,54 +1439,43 @@ export default function SniperGame() {
           borderBottom: true,
           borderRight: true,
         },
-      ].map(
-        (corner, index) => (
-          <div
-            key={index}
-            style={{
-              position:
-                "fixed",
-              top:
-                corner.top,
-              bottom:
-                corner.bottom,
-              left:
-                corner.left,
-              right:
-                corner.right,
-              width: 16,
-              height: 16,
-
-              borderTop:
-                corner.borderTop
-                  ? `1.5px solid ${COLORS.chrome}45`
-                  : undefined,
-
-              borderBottom:
-                corner.borderBottom
-                  ? `1.5px solid ${COLORS.chrome}45`
-                  : undefined,
-
-              borderLeft:
-                corner.borderLeft
-                  ? `1.5px solid ${COLORS.chrome}45`
-                  : undefined,
-
-              borderRight:
-                corner.borderRight
-                  ? `1.5px solid ${COLORS.chrome}45`
-                  : undefined,
-
-              pointerEvents:
-                "none",
-              zIndex: 50,
-            }}
-          />
-        )
-      )}
+      ].map((c, i) => (
+        <div
+          key={i}
+          style={{
+            position: "fixed",
+            top: c.top,
+            bottom: c.bottom,
+            left: c.left,
+            right: c.right,
+            width: 16,
+            height: 16,
+            borderTop: c.borderTop
+              ? `1.5px solid ${COLORS.chrome}45`
+              : undefined,
+            borderBottom:
+              c.borderBottom
+                ? `1.5px solid ${COLORS.chrome}45`
+                : undefined,
+            borderLeft:
+              c.borderLeft
+                ? `1.5px solid ${COLORS.chrome}45`
+                : undefined,
+            borderRight:
+              c.borderRight
+                ? `1.5px solid ${COLORS.chrome}45`
+                : undefined,
+            pointerEvents:
+              "none",
+            zIndex: 50,
+          }}
+        />
+      ))}
 
       <AnimatePresence mode="wait">
-        {/* HOME */}
+        {/* =================================================================
+            HOME
+            ================================================================= */}
 
         {screen === "home" && (
           <motion.div
@@ -1545,15 +1499,13 @@ export default function SniperGame() {
 
             <div
               style={{
-                textAlign:
-                  "center",
+                textAlign: "center",
                 marginBottom: 24,
               }}
             >
               <div
                 style={{
-                  display:
-                    "flex",
+                  display: "flex",
                   alignItems:
                     "center",
                   justifyContent:
@@ -1566,9 +1518,7 @@ export default function SniperGame() {
                   color={
                     COLORS.chrome
                   }
-                  strokeWidth={
-                    1.75
-                  }
+                  strokeWidth={1.75}
                 />
 
                 <span
@@ -1576,8 +1526,7 @@ export default function SniperGame() {
                     fontFamily:
                       FONT_MONO,
                     fontSize: 12,
-                    letterSpacing:
-                      3.5,
+                    letterSpacing: 3.5,
                     color:
                       COLORS.textMuted,
                     textTransform:
@@ -1598,9 +1547,7 @@ export default function SniperGame() {
                   marginTop: 10,
                 }}
               >
-                {
-                  todaySum
-                }
+                {todaySum}
               </div>
 
               <div
@@ -1612,20 +1559,18 @@ export default function SniperGame() {
                     COLORS.textMuted,
                   textTransform:
                     "uppercase",
-                  letterSpacing:
-                    1.2,
+                  letterSpacing: 1.2,
                 }}
               >
                 kills today
               </div>
             </div>
 
-            {/* TAB BAR */}
+            {/* TABS */}
 
             <div
               style={{
-                display:
-                  "flex",
+                display: "flex",
                 gap: 4,
                 marginBottom: 22,
                 padding: 4,
@@ -1643,9 +1588,7 @@ export default function SniperGame() {
 
                   return (
                     <button
-                      key={
-                        tab.id
-                      }
+                      key={tab.id}
                       onClick={() =>
                         setSubScreen(
                           tab.id
@@ -1662,8 +1605,7 @@ export default function SniperGame() {
                         gap: 6,
                         padding:
                           "9px 6px",
-                        borderRadius:
-                          3,
+                        borderRadius: 3,
                         border:
                           "none",
                         background:
@@ -1687,9 +1629,8 @@ export default function SniperGame() {
                       <tab.Icon
                         size={14}
                       />
-                      {
-                        tab.label
-                      }
+
+                      {tab.label}
                     </button>
                   );
                 }
@@ -1697,7 +1638,9 @@ export default function SniperGame() {
             </div>
 
             <AnimatePresence mode="wait">
-              {/* BASE */}
+              {/* ===========================================================
+                  BASE
+                  =========================================================== */}
 
               {subScreen ===
                 "base" && (
@@ -1723,19 +1666,15 @@ export default function SniperGame() {
                     }}
                   >
                     {CATEGORY_ORDER.map(
-                      (
-                        category
-                      ) => (
+                      (cat) => (
                         <CategoryCard
-                          key={
-                            category
-                          }
+                          key={cat}
                           category={
-                            category
+                            cat
                           }
                           total={
                             todayTotals[
-                              category
+                              cat
                             ]
                           }
                           onSelect={
@@ -1787,18 +1726,17 @@ export default function SniperGame() {
                           )
                           .map(
                             (
-                              session
+                              s
                             ) => {
                               const meta =
                                 CATEGORY_META[
-                                  session
-                                    .category
+                                  s.category
                                 ];
 
                               return (
                                 <div
                                   key={
-                                    session.id
+                                    s.id
                                   }
                                   style={{
                                     display:
@@ -1809,8 +1747,7 @@ export default function SniperGame() {
                                       "center",
                                     padding:
                                       "10px 14px",
-                                    borderRadius:
-                                      4,
+                                    borderRadius: 4,
                                     borderLeft: `2px solid ${meta.color}`,
                                     background:
                                       COLORS.panel,
@@ -1823,8 +1760,7 @@ export default function SniperGame() {
                                     style={{
                                       color:
                                         meta.color,
-                                      fontWeight:
-                                        600,
+                                      fontWeight: 600,
                                     }}
                                   >
                                     {
@@ -1839,7 +1775,7 @@ export default function SniperGame() {
                                     }}
                                   >
                                     {Math.round(
-                                      session.durationMs /
+                                      s.durationMs /
                                         60000
                                     )}
                                     m
@@ -1847,12 +1783,11 @@ export default function SniperGame() {
 
                                   <span
                                     style={{
-                                      fontWeight:
-                                        700,
+                                      fontWeight: 700,
                                     }}
                                   >
                                     {
-                                      session.kills
+                                      s.kills
                                     }{" "}
                                     kills
                                   </span>
@@ -1866,7 +1801,9 @@ export default function SniperGame() {
                 </motion.div>
               )}
 
-              {/* LEADERBOARD */}
+              {/* ===========================================================
+                  LEADERBOARD
+                  =========================================================== */}
 
               {subScreen ===
                 "leaderboard" && (
@@ -1882,6 +1819,8 @@ export default function SniperGame() {
                     opacity: 0,
                   }}
                 >
+                  {/* TITLE */}
+
                   <div
                     style={{
                       marginBottom: 16,
@@ -1912,178 +1851,45 @@ export default function SniperGame() {
                         color:
                           COLORS.textMuted,
                         marginTop: 4,
-                        lineHeight:
-                          1.45,
+                        lineHeight: 1.45,
                       }}
                     >
-                      Live ranking.
-                      Your current
-                      score can take
-                      rank #1 without
-                      changing any
-                      historical
-                      record.
-                    </div>
-                  </div>
-
-                  {/* IDEAL WORKLOAD */}
-
-                  <div
-                    style={{
-                      marginBottom: 14,
-                      padding:
-                        "12px 14px",
-                      borderRadius: 4,
-                      background:
-                        `${COLORS.chrome}0d`,
-                      border: `1px solid ${COLORS.chrome}33`,
-                    }}
-                  >
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        justifyContent:
-                          "space-between",
-                        alignItems:
-                          "center",
-                      }}
-                    >
-                      <div>
-                        <div
-                          style={{
-                            fontFamily:
-                              FONT_MONO,
-                            fontSize: 10,
-                            color:
-                              COLORS.chrome,
-                            textTransform:
-                              "uppercase",
-                            letterSpacing:
-                              1.2,
-                          }}
-                        >
-                          Ideal workload
-                        </div>
-
-                        <div
-                          style={{
-                            marginTop: 4,
-                            fontFamily:
-                              FONT_DISPLAY,
-                            fontSize: 15,
-                            fontWeight:
-                              700,
-                          }}
-                        >
-                          12 hours
-                          structured
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          textAlign:
-                            "right",
-                          fontFamily:
-                            FONT_MONO,
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 16,
-                            fontWeight:
-                              700,
-                            color:
-                              COLORS.chrome,
-                          }}
-                        >
-                          {
-                            IDEAL_SELF_KILLS
-                          }
-                        </div>
-
-                        <div
-                          style={{
-                            fontSize: 9,
-                            color:
-                              COLORS.textMuted,
-                            textTransform:
-                              "uppercase",
-                          }}
-                        >
-                          target kills
-                        </div>
-                      </div>
+                      Six benchmarks
+                      rise from{" "}
+                      <strong>
+                        06:00
+                      </strong>{" "}
+                      to{" "}
+                      <strong>
+                        22:00
+                      </strong>{" "}
+                      using randomized
+                      progression.
+                      YOU uses your
+                      actual score.
                     </div>
 
                     <div
                       style={{
+                        fontFamily:
+                          FONT_MONO,
+                        fontSize: 10,
+                        color:
+                          COLORS.textMuted,
                         marginTop: 8,
-                        display:
-                          "flex",
-                        gap: 6,
-                        flexWrap:
-                          "wrap",
+                        opacity: 0.75,
                       }}
                     >
-                      <span
-                        style={{
-                          padding:
-                            "4px 7px",
-                          borderRadius:
-                            3,
-                          background:
-                            COLORS.panel,
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 9.5,
-                          color:
-                            COLORS.textMuted,
-                        }}
-                      >
-                        4 × 90m
-                      </span>
-
-                      <span
-                        style={{
-                          padding:
-                            "4px 7px",
-                          borderRadius:
-                            3,
-                          background:
-                            COLORS.panel,
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 9.5,
-                          color:
-                            COLORS.textMuted,
-                        }}
-                      >
-                        24 × 15m
-                      </span>
-
-                      <span
-                        style={{
-                          padding:
-                            "4px 7px",
-                          borderRadius:
-                            3,
-                          background:
-                            COLORS.panel,
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 9.5,
-                          color:
-                            COLORS.textMuted,
-                        }}
-                      >
-                        720m total
-                      </span>
+                      4 × 90m + 24 ×
+                      15m ={" "}
+                      {
+                        IDEAL_TOTAL_MINUTES
+                      }
+                      m / 12h ideal
                     </div>
                   </div>
 
-                  {/* DYNAMIC RANKING */}
+                  {/* LEADERBOARD */}
 
                   <div
                     style={{
@@ -2097,30 +1903,17 @@ export default function SniperGame() {
                     {leaderboard.map(
                       (
                         entry,
-                        index
+                        i
                       ) => {
                         const rank =
-                          index + 1;
-
-                        const isTopThree =
-                          rank <= 3;
+                          i + 1;
 
                         return (
                           <motion.div
+                            layout
                             key={
                               entry.id
                             }
-                            layout
-                            initial={{
-                              opacity: 0,
-                            }}
-                            animate={{
-                              opacity: 1,
-                            }}
-                            transition={{
-                              duration:
-                                0.2,
-                            }}
                             style={{
                               display:
                                 "flex",
@@ -2129,28 +1922,15 @@ export default function SniperGame() {
                               gap: 12,
                               padding:
                                 "11px 14px",
-                              borderRadius:
-                                4,
-
+                              borderRadius: 4,
                               background:
                                 entry.isYou
                                   ? `${COLORS.chrome}14`
-                                  : entry.isIdeal
-                                  ? `${COLORS.chrome}09`
                                   : COLORS.panel,
-
                               border:
                                 entry.isYou
                                   ? `1px solid ${COLORS.chrome}66`
-                                  : entry.isIdeal
-                                  ? `1px solid ${COLORS.chrome}33`
                                   : `1px solid transparent`,
-
-                              boxShadow:
-                                entry.isYou &&
-                                rank === 1
-                                  ? `0 0 18px ${COLORS.chrome}12`
-                                  : "none",
                             }}
                           >
                             {/* RANK */}
@@ -2168,15 +1948,15 @@ export default function SniperGame() {
                                 fontFamily:
                                   FONT_MONO,
                                 fontSize: 13,
-                                fontWeight:
-                                  700,
+                                fontWeight: 700,
                                 color:
                                   rankColor(
                                     rank
                                   ),
                               }}
                             >
-                              {isTopThree ? (
+                              {rank ===
+                              1 ? (
                                 <Trophy
                                   size={
                                     15
@@ -2196,88 +1976,42 @@ export default function SniperGame() {
                               style={{
                                 flex: 1,
                                 minWidth: 0,
+                                fontFamily:
+                                  FONT_DISPLAY,
+                                fontWeight:
+                                  entry.isYou
+                                    ? 700
+                                    : 600,
+                                fontSize: 14,
+                                color:
+                                  entry.isYou
+                                    ? COLORS.chrome
+                                    : entry.color ??
+                                      COLORS.text,
+                                letterSpacing:
+                                  0.3,
                               }}
                             >
-                              <div
-                                style={{
-                                  display:
-                                    "flex",
-                                  alignItems:
-                                    "center",
-                                  gap: 6,
-                                }}
-                              >
-                                <span
+                              {entry.name}
+
+                              {entry.isYou && (
+                                <div
                                   style={{
                                     fontFamily:
-                                      FONT_DISPLAY,
-                                    fontWeight:
-                                      entry.isYou ||
-                                      entry.isIdeal
-                                        ? 700
-                                        : 600,
-                                    fontSize:
-                                      14,
+                                      FONT_MONO,
+                                    fontSize: 8.5,
                                     color:
-                                      entry.isYou
-                                        ? COLORS.chrome
-                                        : entry.isIdeal
-                                        ? COLORS.chrome
-                                        : COLORS.text,
+                                      COLORS.textMuted,
+                                    marginTop: 2,
+                                    textTransform:
+                                      "uppercase",
                                     letterSpacing:
-                                      0.3,
+                                      0.8,
                                   }}
                                 >
-                                  {
-                                    entry.name
-                                  }
-                                </span>
-
-                                {entry.isYou &&
-                                  rank ===
-                                    1 && (
-                                    <span
-                                      style={{
-                                        fontFamily:
-                                          FONT_MONO,
-                                        fontSize:
-                                          8,
-                                        padding:
-                                          "2px 4px",
-                                        borderRadius:
-                                          2,
-                                        background:
-                                          COLORS.chrome,
-                                        color:
-                                          COLORS.void,
-                                        letterSpacing:
-                                          0.5,
-                                      }}
-                                    >
-                                      #1
-                                    </span>
-                                  )}
-                              </div>
-
-                              <div
-                                style={{
-                                  marginTop: 2,
-                                  fontFamily:
-                                    FONT_MONO,
-                                  fontSize:
-                                    9.5,
-                                  color:
-                                    COLORS.textMuted,
-                                  textTransform:
-                                    "uppercase",
-                                  letterSpacing:
-                                    0.6,
-                                }}
-                              >
-                                {
-                                  entry.subtitle
-                                }
-                              </div>
+                                  current
+                                </div>
+                              )}
                             </div>
 
                             {/* SCORE */}
@@ -2286,20 +2020,15 @@ export default function SniperGame() {
                               style={{
                                 fontFamily:
                                   FONT_MONO,
-                                fontSize:
-                                  15,
-                                fontWeight:
-                                  700,
+                                fontSize: 15,
+                                fontWeight: 700,
                                 color:
-                                  entry.isYou ||
-                                  entry.isIdeal
+                                  entry.isYou
                                     ? COLORS.chrome
                                     : COLORS.textMuted,
                               }}
                             >
-                              {
-                                entry.kills
-                              }
+                              {entry.kills}
                             </div>
                           </motion.div>
                         );
@@ -2307,66 +2036,66 @@ export default function SniperGame() {
                     )}
                   </div>
 
-                  {/* RECORD RULE */}
+                  {/* HISTORICAL RULE */}
 
                   <div
                     style={{
                       marginTop: 18,
                       padding:
-                        "10px 12px",
-                      borderTop: `1px solid ${COLORS.panelLine}`,
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize: 9.5,
-                      lineHeight:
-                        1.55,
-                      color:
-                        COLORS.textMuted,
+                        "11px 13px",
+                      borderRadius: 4,
+                      border: `1px solid ${COLORS.panelLine}`,
+                      background:
+                        `${COLORS.panel}88`,
                     }}
                   >
                     <div
                       style={{
+                        fontFamily:
+                          FONT_MONO,
+                        fontSize: 9.5,
                         color:
-                          COLORS.chrome,
-                        marginBottom: 4,
+                          COLORS.textMuted,
+                        textTransform:
+                          "uppercase",
+                        letterSpacing:
+                          1,
+                        lineHeight: 1.5,
                       }}
                     >
-                      RECORD RULE
-                    </div>
-
-                    <div>
-                      YOU is live and
-                      can rank #1
-                      immediately.
-                    </div>
-
-                    <div>
                       Historical
-                      records never
-                      include today&apos;s
-                      unfinished score.
+                      protection
                     </div>
 
-                    <div>
-                      PERSONAL BEST,
-                      30-DAY BEST, and
-                      7-DAY BEST update
-                      only when a day
-                      becomes completed.
-                    </div>
-
-                    <div>
-                      This prevents a
-                      great unfinished
-                      day from rewriting
-                      its own historical
-                      benchmark.
+                    <div
+                      style={{
+                        fontFamily:
+                          FONT_DISPLAY,
+                        fontSize: 11.5,
+                        color:
+                          COLORS.textMuted,
+                        marginTop: 3,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      Today&apos;s score
+                      can take rank #1
+                      immediately, but
+                      it does not overwrite
+                      Personal Best,
+                      7-Day Best, or
+                      30-Day Best until
+                      today becomes a
+                      completed historical
+                      day.
                     </div>
                   </div>
                 </motion.div>
               )}
 
-              {/* REWARDS */}
+              {/* ===========================================================
+                  REWARDS
+                  =========================================================== */}
 
               {subScreen ===
                 "rewards" && (
@@ -2411,21 +2140,19 @@ export default function SniperGame() {
                       style={{
                         fontFamily:
                           FONT_DISPLAY,
-                        fontSize:
-                          13.5,
+                        fontSize: 13.5,
                         color:
                           COLORS.textMuted,
                         marginTop: 4,
-                        lineHeight:
-                          1.4,
+                        lineHeight: 1.4,
                       }}
                     >
                       Sorted highest
                       value first —
                       uppercase outranks
                       lowercase outranks
-                      digits, so ZZZ is
-                      as good as it gets.
+                      digits, so ZZZ is as
+                      good as it gets.
                     </div>
                   </div>
 
@@ -2437,8 +2164,7 @@ export default function SniperGame() {
                           "28px 18px",
                         textAlign:
                           "center",
-                        borderRadius:
-                          4,
+                        borderRadius: 4,
                         border: `1px dashed ${COLORS.panelLine}`,
                         color:
                           COLORS.textMuted,
@@ -2463,27 +2189,24 @@ export default function SniperGame() {
                       }}
                     >
                       <AnimatePresence
-                        initial={
-                          false
-                        }
+                        initial={false}
                       >
                         {sortedRewards.map(
-                          (reward) => {
+                          (r) => {
                             const tier =
                               rewardTier(
-                                reward.code
+                                r.code
                               );
 
-                            const categoryColor =
+                            const catColor =
                               CATEGORY_META[
-                                reward
-                                  .category
+                                r.category
                               ].color;
 
                             return (
                               <motion.div
                                 key={
-                                  reward.id
+                                  r.id
                                 }
                                 layout
                                 initial={{
@@ -2509,8 +2232,7 @@ export default function SniperGame() {
                                   gap: 12,
                                   padding:
                                     "10px 12px",
-                                  borderRadius:
-                                    4,
+                                  borderRadius: 4,
                                   background:
                                     COLORS.panel,
                                   borderLeft: `3px solid ${TIER_COLOR[tier]}`,
@@ -2525,9 +2247,8 @@ export default function SniperGame() {
                                     borderRadius:
                                       "50%",
                                     background:
-                                      categoryColor,
-                                    flexShrink:
-                                      0,
+                                      catColor,
+                                    flexShrink: 0,
                                   }}
                                   aria-hidden
                                 />
@@ -2535,18 +2256,15 @@ export default function SniperGame() {
                                 <div
                                   style={{
                                     flex: 1,
-                                    minWidth:
-                                      0,
+                                    minWidth: 0,
                                   }}
                                 >
                                   <div
                                     style={{
                                       fontFamily:
                                         FONT_MONO,
-                                      fontSize:
-                                        19,
-                                      fontWeight:
-                                        700,
+                                      fontSize: 19,
+                                      fontWeight: 700,
                                       color:
                                         TIER_COLOR[
                                           tier
@@ -2556,7 +2274,7 @@ export default function SniperGame() {
                                     }}
                                   >
                                     {
-                                      reward.code
+                                      r.code
                                     }
                                   </div>
 
@@ -2564,8 +2282,7 @@ export default function SniperGame() {
                                     style={{
                                       fontFamily:
                                         FONT_MONO,
-                                      fontSize:
-                                        10,
+                                      fontSize: 10,
                                       color:
                                         COLORS.textMuted,
                                       textTransform:
@@ -2579,7 +2296,7 @@ export default function SniperGame() {
                                     }{" "}
                                     ·{" "}
                                     {new Date(
-                                      reward.earnedAt
+                                      r.earnedAt
                                     ).toLocaleTimeString(
                                       [],
                                       {
@@ -2594,13 +2311,12 @@ export default function SniperGame() {
                                 <button
                                   onClick={() =>
                                     deleteReward(
-                                      reward.id
+                                      r.id
                                     )
                                   }
                                   aria-label="Delete reward"
                                   style={{
-                                    flexShrink:
-                                      0,
+                                    flexShrink: 0,
                                     width: 32,
                                     height: 32,
                                     display:
@@ -2609,8 +2325,7 @@ export default function SniperGame() {
                                       "center",
                                     justifyContent:
                                       "center",
-                                    borderRadius:
-                                      4,
+                                    borderRadius: 4,
                                     border: `1px solid ${COLORS.panelLine}`,
                                     background:
                                       "transparent",
@@ -2644,8 +2359,7 @@ export default function SniperGame() {
                 handleReset
               }
               style={{
-                display:
-                  "flex",
+                display: "flex",
                 alignItems:
                   "center",
                 gap: 6,
@@ -2655,18 +2369,15 @@ export default function SniperGame() {
                   "8px 4px",
                 background:
                   "transparent",
-                border:
-                  "none",
+                border: "none",
                 color:
                   COLORS.textMuted,
                 fontFamily:
                   FONT_MONO,
-                fontSize:
-                  10.5,
+                fontSize: 10.5,
                 textTransform:
                   "uppercase",
-                letterSpacing:
-                  1,
+                letterSpacing: 1,
                 cursor:
                   "pointer",
               }}
@@ -2674,15 +2385,17 @@ export default function SniperGame() {
               <RotateCcw
                 size={12}
               />
+
               Reset log
             </button>
           </motion.div>
         )}
 
-        {/* ACTIVE */}
+        {/* =================================================================
+            ACTIVE
+            ================================================================= */}
 
-        {screen ===
-          "active" &&
+        {screen === "active" &&
           active && (
             <ScopeOverlay
               category={
@@ -2706,10 +2419,11 @@ export default function SniperGame() {
             />
           )}
 
-        {/* RESULT */}
+        {/* =================================================================
+            RESULT
+            ================================================================= */}
 
-        {screen ===
-          "result" &&
+        {screen === "result" &&
           result && (
             <ResultCard
               category={
