@@ -510,15 +510,7 @@ function getMonthAverage(
  * 12 hours
  */
 
-const IDEAL_BLOCKS_90 = 4;
-const IDEAL_BLOCKS_15 = 24;
-
-const IDEAL_MINUTES =
-  IDEAL_BLOCKS_90 * 90 +
-  IDEAL_BLOCKS_15 * 15;
-
-const IDEAL_KILLS =
-  calcKills(IDEAL_MINUTES * 60000);
+const IDEAL_KILLS = 521;
 
 // ============================================================================
 // RANDOMIZED LEADERBOARD CURVE
