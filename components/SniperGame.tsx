@@ -165,7 +165,6 @@ function computeTodayTotals(sessions: KillSession[], now: number): Record<Catego
 // 90-minute zero and how many sessions it puts in per day. Good bots run
 // tight ~90-minute sessions; bad bots either quit too early or grind on
 // long past the point of diminishing returns.
-
 interface Bot {
   id: string;
   name: string;
@@ -175,23 +174,47 @@ interface Bot {
   endFrac: number; // fraction of the day their grind is maxed out by
 }
 
+// sessionsPerDay x typicalMinutes ≈ their popularly-reported real working
+// hours per day (approximate, not verified historical record).
 const BOTS: Bot[] = [
-  { id: "ghost7", name: "GHOST-7", typicalMinutes: 92, sessionsPerDay: 2, startFrac: 0.25, endFrac: 0.85 },
-  { id: "viper1", name: "VIPER-1", typicalMinutes: 85, sessionsPerDay: 2, startFrac: 0.3, endFrac: 0.9 },
-  { id: "nullpoint", name: "NULLPOINT", typicalMinutes: 100, sessionsPerDay: 2, startFrac: 0.2, endFrac: 0.75 },
-  { id: "echo3", name: "ECHO-3", typicalMinutes: 78, sessionsPerDay: 2, startFrac: 0.35, endFrac: 0.95 },
-  { id: "raven", name: "RAVEN", typicalMinutes: 70, sessionsPerDay: 2, startFrac: 0.1, endFrac: 0.6 },
-  { id: "static", name: "STATIC", typicalMinutes: 110, sessionsPerDay: 1, startFrac: 0.4, endFrac: 0.7 },
-  { id: "drifter", name: "DRIFTER", typicalMinutes: 55, sessionsPerDay: 2, startFrac: 0.15, endFrac: 0.65 },
-  { id: "cobalt", name: "COBALT", typicalMinutes: 130, sessionsPerDay: 1, startFrac: 0.3, endFrac: 0.55 },
-  { id: "blip", name: "BLIP", typicalMinutes: 25, sessionsPerDay: 3, startFrac: 0.1, endFrac: 0.9 },
-  { id: "sparrow", name: "SPARROW", typicalMinutes: 45, sessionsPerDay: 2, startFrac: 0.2, endFrac: 0.8 },
-  { id: "rusty", name: "RUSTY", typicalMinutes: 150, sessionsPerDay: 1, startFrac: 0.45, endFrac: 0.65 },
-  { id: "flicker", name: "FLICKER", typicalMinutes: 20, sessionsPerDay: 3, startFrac: 0.05, endFrac: 0.95 },
-  { id: "idle9", name: "IDLE-9", typicalMinutes: 15, sessionsPerDay: 2, startFrac: 0.5, endFrac: 0.9 },
-  { id: "novice", name: "NOVICE", typicalMinutes: 35, sessionsPerDay: 1, startFrac: 0.6, endFrac: 0.95 },
+  { id: "einstein", name: "EINSTEIN", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.25, endFrac: 0.85 },   // ~10h
+  { id: "musk", name: "MUSK", typicalMinutes: 87, sessionsPerDay: 11, startFrac: 0.1, endFrac: 0.98 },           // ~16h
+  { id: "curie", name: "CURIE", typicalMinutes: 94, sessionsPerDay: 7, startFrac: 0.2, endFrac: 0.85 },          // ~11h
+  { id: "davinci", name: "DA VINCI", typicalMinutes: 60, sessionsPerDay: 8, startFrac: 0.15, endFrac: 0.9 },     // ~8h, scattered
+  { id: "tesla", name: "TESLA", typicalMinutes: 88, sessionsPerDay: 13, startFrac: 0.05, endFrac: 0.98 },        // ~19h
+  { id: "newton", name: "NEWTON", typicalMinutes: 87, sessionsPerDay: 11, startFrac: 0.15, endFrac: 0.95 },      // ~16h (Principia era)
+  { id: "lovelace", name: "LOVELACE", typicalMinutes: 84, sessionsPerDay: 5, startFrac: 0.25, endFrac: 0.8 },    // ~7h
+  { id: "darwin", name: "DARWIN", typicalMinutes: 90, sessionsPerDay: 3, startFrac: 0.2, endFrac: 0.55 },        // ~4.5h, famously short & structured
+  { id: "jobs", name: "JOBS", typicalMinutes: 90, sessionsPerDay: 8, startFrac: 0.25, endFrac: 0.9 },            // ~12h
+  { id: "franklin", name: "FRANKLIN", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.1, endFrac: 0.75 },    // ~10h
+  { id: "edison", name: "EDISON", typicalMinutes: 90, sessionsPerDay: 12, startFrac: 0.05, endFrac: 0.98 },      // ~18h
+  { id: "mandela", name: "MANDELA", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.2, endFrac: 0.8 },       // ~10h
+  { id: "gandhi", name: "GANDHI", typicalMinutes: 87, sessionsPerDay: 11, startFrac: 0.08, endFrac: 0.9 },       // ~16h
+  { id: "mlk", name: "MLK JR.", typicalMinutes: 93, sessionsPerDay: 9, startFrac: 0.2, endFrac: 0.9 },           // ~14h
+  { id: "aristotle", name: "ARISTOTLE", typicalMinutes: 96, sessionsPerDay: 5, startFrac: 0.2, endFrac: 0.75 },  // ~8h
+  { id: "socrates", name: "SOCRATES", typicalMinutes: 90, sessionsPerDay: 4, startFrac: 0.2, endFrac: 0.7 },     // ~6h
+  { id: "confucius", name: "CONFUCIUS", typicalMinutes: 96, sessionsPerDay: 5, startFrac: 0.15, endFrac: 0.7 },  // ~8h
+  { id: "mozart", name: "MOZART", typicalMinutes: 94, sessionsPerDay: 7, startFrac: 0.3, endFrac: 0.85 },        // ~11h
+  { id: "beethoven", name: "BEETHOVEN", typicalMinutes: 96, sessionsPerDay: 5, startFrac: 0.25, endFrac: 0.7 },  // ~8h
+  { id: "shakespeare", name: "SHAKESPEARE", typicalMinutes: 96, sessionsPerDay: 5, startFrac: 0.2, endFrac: 0.75 }, // ~8h
+  { id: "picasso", name: "PICASSO", typicalMinutes: 90, sessionsPerDay: 6, startFrac: 0.35, endFrac: 0.95 },     // ~9h
+  { id: "vangogh", name: "VAN GOGH", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.2, endFrac: 0.7 },      // ~10h
+  { id: "galileo", name: "GALILEO", typicalMinutes: 90, sessionsPerDay: 6, startFrac: 0.15, endFrac: 0.7 },      // ~9h
+  { id: "alexander", name: "ALEXANDER", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.1, endFrac: 0.8 },   // ~10h
+  { id: "caesar", name: "CAESAR", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.15, endFrac: 0.8 },        // ~10h
+  { id: "napoleon", name: "NAPOLEON", typicalMinutes: 93, sessionsPerDay: 11, startFrac: 0.03, endFrac: 0.98 },  // ~17h, famously slept little
+  { id: "lincoln", name: "LINCOLN", typicalMinutes: 87, sessionsPerDay: 9, startFrac: 0.2, endFrac: 0.85 },      // ~13h
+  { id: "churchill", name: "CHURCHILL", typicalMinutes: 94, sessionsPerDay: 7, startFrac: 0.3, endFrac: 0.98 },  // ~11h, plus late nights
+  { id: "turing", name: "TURING", typicalMinutes: 90, sessionsPerDay: 6, startFrac: 0.25, endFrac: 0.8 },        // ~9h
+  { id: "hawking", name: "HAWKING", typicalMinutes: 96, sessionsPerDay: 5, startFrac: 0.3, endFrac: 0.7 },       // ~8h
+  { id: "gates", name: "GATES", typicalMinutes: 90, sessionsPerDay: 8, startFrac: 0.2, endFrac: 0.8 },           // ~12h
+  { id: "buffett", name: "BUFFETT", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.15, endFrac: 0.55 },     // ~10h
+  { id: "bezos", name: "BEZOS", typicalMinutes: 90, sessionsPerDay: 8, startFrac: 0.25, endFrac: 0.75 },         // ~12h
+  { id: "disney", name: "DISNEY", typicalMinutes: 87, sessionsPerDay: 9, startFrac: 0.25, endFrac: 0.7 },        // ~13h
+  { id: "ford", name: "FORD", typicalMinutes: 86, sessionsPerDay: 7, startFrac: 0.1, endFrac: 0.7 },             // ~10h
+  { id: "ali", name: "ALI", typicalMinutes: 84, sessionsPerDay: 5, startFrac: 0.05, endFrac: 0.55 },             // ~7h training
+  { id: "angelou", name: "ANGELOU", typicalMinutes: 84, sessionsPerDay: 5, startFrac: 0.2, endFrac: 0.55 },      // ~7h, documented hotel-room routine
 ];
-
 /** Deterministic 0..1 pseudo-random value from a string seed — same day,
  *  same bot, same number, every time, with no state to persist. */
 function hash01(str: string): number {
@@ -710,8 +733,7 @@ export default function SniperGame() {
                         letterSpacing: 1.5,
                       }}
                     >
-                      Collected codes
-                      {sortedRewards.length} | 238 328
+                      Collected codes | {sortedRewards.length} | 238 328
                     </div>
                     <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13.5, color: COLORS.textMuted, marginTop: 4, lineHeight: 1.4 }}>
                       Sorted highest value first — uppercase outranks lowercase outranks digits, so ZZZ is as good as it gets.
