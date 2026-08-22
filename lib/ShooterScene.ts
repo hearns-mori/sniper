@@ -150,7 +150,7 @@ export class ShooterScene extends Phaser.Scene {
       lifespan: 260,
       speed: { min: 40, max: 140 },
       scale: { start: 1.4, end: 0 },
-      quantity: 8,
+      quantity: 6,
       emitting: false,
     });
 
@@ -279,7 +279,7 @@ export class ShooterScene extends Phaser.Scene {
       this.player.x + dirX * 20,
       this.player.y + dirY * 20
     );
-    this.muzzleParticles.explode(3);
+    this.muzzleParticles.explode();
 
     // Auto-deactivate after 1.2s in case it never leaves world bounds
     // (belt-and-suspenders alongside cullOffscreenBullets).
@@ -295,9 +295,11 @@ export class ShooterScene extends Phaser.Scene {
   private cullOffscreenBullets() {
     const { width, height } = this.scale;
 
-    this.bullets.children.each((child) => {
-      const b = child as Phaser.Physics.Arcade.Image;
-      if (!b.active) return true;
+    const bulletChildren =
+      this.bullets.getChildren() as Phaser.Physics.Arcade.Image[];
+
+    for (const b of bulletChildren) {
+      if (!b.active) continue;
 
       if (
         b.x < -20 ||
@@ -309,8 +311,7 @@ export class ShooterScene extends Phaser.Scene {
         b.setVisible(false);
         b.disableBody(true, true);
       }
-      return true;
-    });
+    }
   }
 
   private updateBotSpawning(time: number, elapsedMs: number) {
@@ -352,9 +353,10 @@ export class ShooterScene extends Phaser.Scene {
   }
 
   private updateBotChase() {
-    this.bots.children.each((child) => {
-      const bot = child as BotSprite;
-      if (!bot.active) return true;
+    const botChildren = this.bots.getChildren() as BotSprite[];
+
+    for (const bot of botChildren) {
+      if (!bot.active) continue;
 
       const body = bot.body as Phaser.Physics.Arcade.Body;
       const speed = (bot.getData("speed") as number) ?? 70;
@@ -364,8 +366,7 @@ export class ShooterScene extends Phaser.Scene {
       const len = Math.hypot(dx, dy) || 1;
 
       body.setVelocity((dx / len) * speed, (dy / len) * speed);
-      return true;
-    });
+    }
   }
 
   private handleBulletHitsBot: Phaser.Types.Physics.Arcade.ArcadePhysicsCallback =
@@ -383,7 +384,7 @@ export class ShooterScene extends Phaser.Scene {
       bot.hp = (bot.hp ?? 1) - BULLET_DAMAGE;
 
       this.hitParticles.setPosition(bot.x, bot.y);
-      this.hitParticles.explode(6);
+      this.hitParticles.explode();
 
       if ((bot.hp ?? 0) <= 0) {
         this.kills += 1;
