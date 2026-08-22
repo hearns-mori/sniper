@@ -10,12 +10,14 @@ import {
   Trash2,
   Trophy,
 } from "lucide-react";
+
 import {
   calcKills,
   calcRate,
   OPTIMAL_MINUTES,
   type Category,
 } from "@/lib/gameLogic";
+
 import {
   type ActiveSession,
   type GameState,
@@ -26,12 +28,14 @@ import {
   saveActiveSession,
   saveState,
 } from "@/lib/storage";
+
 import {
   CATEGORY_META,
   COLORS,
   FONT_DISPLAY,
   FONT_MONO,
 } from "@/lib/theme";
+
 import CategoryCard from "./CategoryCard";
 import ScopeOverlay from "./ScopeOverlay";
 import ResultCard from "./ResultCard";
@@ -52,9 +56,9 @@ const CATEGORY_ORDER: Category[] = [
   "army",
 ];
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // REWARDS
-// ═══════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
 const REWARD_CHARS =
   "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -79,9 +83,7 @@ function generateRewardCode(): string {
 
   for (let i = 0; i < 3; i++) {
     code +=
-      REWARD_CHARS[
-        Math.floor(Math.random() * REWARD_CHARS.length)
-      ];
+      REWARD_CHARS[Math.floor(Math.random() * REWARD_CHARS.length)];
   }
 
   return code;
@@ -198,8 +200,9 @@ function loadRewardProgress(): RewardProgress | null {
   if (!isBrowser()) return null;
 
   try {
-    const raw =
-      window.localStorage.getItem(REWARD_PROGRESS_KEY);
+    const raw = window.localStorage.getItem(
+      REWARD_PROGRESS_KEY
+    );
 
     if (!raw) return null;
 
@@ -230,15 +233,31 @@ function saveRewardProgress(
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// DAILY TOTALS
-// ═══════════════════════════════════════════════════════════════════════════
+// ============================================================================
+// DATE / DAILY SCORE HELPERS
+// ============================================================================
+
+function startOfLocalDay(timestamp: number): number {
+  const d = new Date(timestamp);
+
+  d.setHours(0, 0, 0, 0);
+
+  return d.getTime();
+}
+
+function endOfLocalDay(timestamp: number): number {
+  const d = new Date(timestamp);
+
+  d.setHours(23, 59, 59, 999);
+
+  return d.getTime();
+}
 
 function isSameLocalDay(
-  ts: number,
+  timestamp: number,
   referenceNow: number
 ): boolean {
-  const a = new Date(ts);
+  const a = new Date(timestamp);
   const b = new Date(referenceNow);
 
   return (
@@ -246,6 +265,17 @@ function isSameLocalDay(
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
   );
+}
+
+function daysAgo(
+  timestamp: number,
+  days: number
+): number {
+  const d = new Date(timestamp);
+
+  d.setDate(d.getDate() - days);
+
+  return d.getTime();
 }
 
 function computeTodayTotals(
@@ -259,393 +289,485 @@ function computeTodayTotals(
   };
 
   for (const session of sessions) {
-    if (
-      isSameLocalDay(
-        session.startTime,
-        now
-      )
-    ) {
-      totals[session.category] +=
-        session.kills;
+    if (isSameLocalDay(session.startTime, now)) {
+      totals[session.category] += session.kills;
     }
   }
 
   return totals;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// LEADERBOARD
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// YOUR IDEAL DAILY WORKLOAD:
-//
-// 4 × 90-minute deep-work blocks = 360 minutes
-// 24 × 15-minute blocks         = 360 minutes
-// Total                         = 720 minutes = 12 hours
-//
-// The leaderboard benchmarks below represent six fixed performance
-// ceilings. Their scores grow from 06:00 → 22:00.
-//
-// IMPORTANT:
-//
-// Randomness controls the SHAPE of the score curve.
-//
-// Randomness DOES NOT modify the peak.
-//
-// Example:
-//
-//     peak = 91
-//
-// Possible progression:
-//
-//     0 → 2 → 2 → 7 → 13 → 11 → 19 → 27 → 25 →
-//     35 → 43 → 41 → 52 → 60 → 59 → 69 → 78 → 84 → 91
-//
-// But NEVER:
-//
-//     91 → 97
-//
-// And at 22:00:
-//
-//     EXACTLY 91
-//
-// ═══════════════════════════════════════════════════════════════════════════
+function getDailyTotals(
+  sessions: KillSession[],
+  fromTimestamp: number,
+  toTimestamp: number
+): Map<string, number> {
+  const daily = new Map<string, number>();
 
-interface Bot {
-  id: string;
-  name: string;
+  for (const session of sessions) {
+    if (
+      session.startTime < fromTimestamp ||
+      session.startTime > toTimestamp
+    ) {
+      continue;
+    }
 
-  /**
-   * Fixed maximum daily score.
-   *
-   * This number NEVER gets randomized.
-   */
-  peak: number;
+    const key = new Date(
+      session.startTime
+    ).toLocaleDateString();
 
-  /**
-   * Controls how irregular the increments are.
-   *
-   * Higher = more bursty.
-   * Lower = more stable.
-   *
-   * It does NOT affect the final peak.
-   */
-  randomness: number;
-}
-
-const BOTS: Bot[] = [
-  {
-    id: "einstein",
-    name: "EINSTEIN",
-    peak: 91,
-    randomness: 1.0,
-  },
-  {
-    id: "musk",
-    name: "MUSK",
-    peak: 88,
-    randomness: 1.15,
-  },
-  {
-    id: "curie",
-    name: "CURIE",
-    peak: 84,
-    randomness: 0.95,
-  },
-  {
-    id: "davinci",
-    name: "DA VINCI",
-    peak: 79,
-    randomness: 1.2,
-  },
-  {
-    id: "tesla",
-    name: "TESLA",
-    peak: 74,
-    randomness: 1.3,
-  },
-  {
-    id: "darwin",
-    name: "DARWIN",
-    peak: 68,
-    randomness: 0.9,
-  },
-];
-
-// ═══════════════════════════════════════════════════════════════════════════
-// DETERMINISTIC RANDOMNESS
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Same seed → same random number.
-//
-// This is important because refreshing the browser must NOT reroll today's
-// leaderboard.
-//
-// The seed contains:
-//
-//     date
-//     bot
-//     increment number
-//
-// Therefore every bot has a unique but stable daily progression.
-//
-
-function hash01(str: string): number {
-  let h = 2166136261;
-
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
+    daily.set(
+      key,
+      (daily.get(key) ?? 0) + session.kills
+    );
   }
 
-  return (h >>> 0) / 4294967295;
+  return daily;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// LEADERBOARD TIME WINDOW
-// ═══════════════════════════════════════════════════════════════════════════
-
-function startOfLocalDay(now: number): number {
-  const d = new Date(now);
-
-  d.setHours(
-    0,
-    0,
-    0,
-    0
+function bestDailyScore(
+  sessions: KillSession[],
+  fromTimestamp: number,
+  toTimestamp: number
+): number {
+  const daily = getDailyTotals(
+    sessions,
+    fromTimestamp,
+    toTimestamp
   );
 
-  return d.getTime();
+  let best = 0;
+
+  for (const value of daily.values()) {
+    best = Math.max(best, value);
+  }
+
+  return best;
 }
 
-function getLeaderboardWindow(
-  now: number
-) {
-  const dayStart =
-    startOfLocalDay(now);
-
-  const start = new Date(dayStart);
-
-  start.setHours(
-    6,
-    0,
-    0,
-    0
-  );
-
-  const end = new Date(dayStart);
-
-  end.setHours(
-    22,
-    0,
-    0,
-    0
-  );
-
-  return {
-    start: start.getTime(),
-    end: end.getTime(),
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BOT SCORE GENERATOR
-// ═══════════════════════════════════════════════════════════════════════════
-
-function botKillsNow(
-  bot: Bot,
+function getYesterdayBest(
+  sessions: KillSession[],
   now: number
 ): number {
-  const {
+  const yesterday = new Date(now);
+
+  yesterday.setDate(
+    yesterday.getDate() - 1
+  );
+
+  const start = startOfLocalDay(
+    yesterday.getTime()
+  );
+
+  const end = endOfLocalDay(
+    yesterday.getTime()
+  );
+
+  return bestDailyScore(
+    sessions,
     start,
-    end,
-  } = getLeaderboardWindow(now);
-
-  // Before 06:00 → zero.
-  if (now <= start) {
-    return 0;
-  }
-
-  // At / after 22:00 → EXACT fixed peak.
-  if (now >= end) {
-    return bot.peak;
-  }
-
-  const totalWindow =
-    end - start;
-
-  /**
-   * 96 checkpoints across 16 hours.
-   *
-   * 16 hours × 6 checkpoints/hour
-   * = one checkpoint approximately every 10 minutes.
-   */
-  const STEPS = 96;
-
-  const elapsed =
-    now - start;
-
-  const progress =
-    elapsed / totalWindow;
-
-  const exactStep =
-    progress * STEPS;
-
-  const currentStep =
-    Math.floor(exactStep);
-
-  // Before first checkpoint.
-  if (currentStep <= 0) {
-    return 0;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // RANDOM INCREMENTS
-  // ═══════════════════════════════════════════════════════════════════════
-  //
-  // We first generate random WEIGHTS.
-  //
-  // These are NOT scores.
-  //
-  // Example:
-  //
-  //     0.4
-  //     1.7
-  //     0.6
-  //     2.1
-  //     ...
-  //
-  // Then we normalize them so their total = 1.
-  //
-  // Therefore the final cumulative score is always exactly bot.peak.
-  //
-
-  const dayKey =
-    new Date(now).toDateString();
-
-  const weights: number[] = [];
-
-  for (
-    let i = 0;
-    i < STEPS;
-    i++
-  ) {
-    const random =
-      hash01(
-        `${dayKey}:${bot.id}:increment:${i}`
-      );
-
-    // Convert 0..1 into -0.5..+0.5.
-    const centered =
-      random - 0.5;
-
-    // Randomized increment weight.
-    const weight =
-      1 +
-      centered *
-        2 *
-        bot.randomness;
-
-    weights.push(
-      Math.max(
-        0.05,
-        weight
-      )
-    );
-  }
-
-  // Total of all random weights.
-  const totalWeight =
-    weights.reduce(
-      (sum, value) =>
-        sum + value,
-      0
-    );
-
-  // Normalize:
-  //
-  // sum(normalized) = 1
-  //
-  const normalized =
-    weights.map(
-      (weight) =>
-        weight /
-        totalWeight
-    );
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // BUILD SCORE FROM RANDOM INCREMENTS
-  // ═══════════════════════════════════════════════════════════════════════
-
-  let score = 0;
-
-  for (
-    let i = 0;
-    i < currentStep;
-    i++
-  ) {
-    score +=
-      normalized[i] *
-      bot.peak;
-  }
-
-  // Partial progress through the current interval.
-  const stepProgress =
-    exactStep -
-    currentStep;
-
-  if (
-    currentStep <
-    STEPS
-  ) {
-    score +=
-      normalized[currentStep] *
-      bot.peak *
-      stepProgress;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // RANDOM PAUSES
-  // ═══════════════════════════════════════════════════════════════════════
-  //
-  // This makes the curve feel less mechanically smooth.
-  //
-  // It is deliberately small.
-  //
-  // The final 22:00 condition above ALWAYS returns the exact peak.
-  //
-
-  const pauseRoll =
-    hash01(
-      `${dayKey}:${bot.id}:pause:${currentStep}`
-    );
-
-  if (pauseRoll < 0.18) {
-    score *= 0.96;
-  }
-
-  // HARD CAP.
-  //
-  // This guarantees the randomized system can never exceed the fixed peak.
-  score =
-    Math.min(
-      bot.peak,
-      score
-    );
-
-  return Math.max(
-    0,
-    Math.round(score)
+    end
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// RANK COLORS
-// ═══════════════════════════════════════════════════════════════════════════
+function getSevenDayBest(
+  sessions: KillSession[],
+  now: number
+): number {
+  const start = startOfLocalDay(
+    daysAgo(now, 6)
+  );
 
-function rankColor(
-  rank: number
-): string {
+  const end = endOfLocalDay(now);
+
+  return bestDailyScore(
+    sessions,
+    start,
+    end
+  );
+}
+
+function getThirtyDayBest(
+  sessions: KillSession[],
+  now: number
+): number {
+  const start = startOfLocalDay(
+    daysAgo(now, 29)
+  );
+
+  const end = endOfLocalDay(now);
+
+  return bestDailyScore(
+    sessions,
+    start,
+    end
+  );
+}
+
+function getPersonalBest(
+  sessions: KillSession[]
+): number {
+  if (sessions.length === 0) {
+    return 0;
+  }
+
+  const daily = new Map<string, number>();
+
+  for (const session of sessions) {
+    const key = new Date(
+      session.startTime
+    ).toLocaleDateString();
+
+    daily.set(
+      key,
+      (daily.get(key) ?? 0) + session.kills
+    );
+  }
+
+  let best = 0;
+
+  for (const value of daily.values()) {
+    best = Math.max(best, value);
+  }
+
+  return best;
+}
+
+function getMonthAverage(
+  sessions: KillSession[],
+  now: number
+): number {
+  const current = new Date(now);
+
+  const year = current.getFullYear();
+  const month = current.getMonth();
+
+  const firstDay = new Date(
+    year,
+    month,
+    1,
+    0,
+    0,
+    0,
+    0
+  );
+
+  const todayDay = current.getDate();
+
+  const daily = new Map<string, number>();
+
+  for (const session of sessions) {
+    const d = new Date(session.startTime);
+
+    if (
+      d.getFullYear() !== year ||
+      d.getMonth() !== month ||
+      d.getDate() > todayDay
+    ) {
+      continue;
+    }
+
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+    daily.set(
+      key,
+      (daily.get(key) ?? 0) + session.kills
+    );
+  }
+
+  let total = 0;
+
+  for (const value of daily.values()) {
+    total += value;
+  }
+
+  /*
+   * Average across every calendar day elapsed this month.
+   *
+   * This prevents a single high-production day from looking like
+   * the monthly average.
+   */
+  return todayDay > 0
+    ? Math.round(total / todayDay)
+    : 0;
+}
+
+// ============================================================================
+// IDEAL
+// ============================================================================
+
+/*
+ * YOUR IDEAL:
+ *
+ * 4 × 90 minutes
+ * +
+ * 24 × 15 minutes
+ * =
+ * 360 + 360
+ * =
+ * 720 minutes
+ * =
+ * 12 hours
+ */
+
+const IDEAL_BLOCKS_90 = 4;
+const IDEAL_BLOCKS_15 = 24;
+
+const IDEAL_MINUTES =
+  IDEAL_BLOCKS_90 * 90 +
+  IDEAL_BLOCKS_15 * 15;
+
+const IDEAL_KILLS =
+  calcKills(IDEAL_MINUTES * 60000);
+
+// ============================================================================
+// RANDOMIZED LEADERBOARD CURVE
+// ============================================================================
+
+/*
+ * Important:
+ *
+ * The randomization NEVER changes the peak.
+ *
+ * Example:
+ *
+ * MONTH AVERAGE peak = 91
+ *
+ * The curve may show:
+ *
+ * 0 → 2 → 3 → 8 → 11 → 10 → 18 → 17 → 25 → ...
+ *
+ * but it can NEVER end at 87, 94, etc.
+ *
+ * At 10 PM it MUST be exactly 91.
+ *
+ * The randomness only controls WHEN/how quickly the
+ * score climbs toward that fixed peak.
+ */
+
+function hash01(seed: string): number {
+  let h = 2166136261;
+
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+
+    h = Math.imul(
+      h,
+      16777619
+    );
+  }
+
+  return (
+    (h >>> 0) /
+    4294967295
+  );
+}
+
+function seededRandom(
+  seed: string
+): number {
+  return hash01(seed);
+}
+
+function smoothstep(t: number): number {
+  const x = Math.min(
+    1,
+    Math.max(0, t)
+  );
+
+  return x * x * (3 - 2 * x);
+}
+
+/*
+ * Generates a deterministic but irregular progression.
+ *
+ * It is intentionally NOT linear.
+ *
+ * The returned value is always between 0 and 1.
+ */
+function randomizedProgress(
+  id: string,
+  now: number
+): number {
+  const dateKey =
+    new Date(now).toDateString();
+
+  const hour =
+    new Date(now).getHours();
+
+  const minute =
+    new Date(now).getMinutes();
+
+  const second =
+    new Date(now).getSeconds();
+
+  const dayFrac =
+    (
+      hour * 60 +
+      minute +
+      second / 60
+    ) /
+    (24 * 60);
+
+  /*
+   * Leaderboard starts at 06:00.
+   */
+  const START_HOUR = 6;
+
+  /*
+   * Leaderboard ends at 22:00.
+   */
+  const END_HOUR = 22;
+
+  const start =
+    START_HOUR / 24;
+
+  const end =
+    END_HOUR / 24;
+
+  if (dayFrac <= start) {
+    return 0;
+  }
+
+  if (dayFrac >= end) {
+    return 1;
+  }
+
+  const normalized =
+    (dayFrac - start) /
+    (end - start);
+
+  /*
+   * Multiple deterministic waves.
+   *
+   * This produces a curve that:
+   *
+   * - accelerates
+   * - slows down
+   * - accelerates again
+   * - has plateaus
+   *
+   * while still always ending exactly at 1.
+   */
+
+  const r1 = seededRandom(
+    `${dateKey}:${id}:wave1`
+  );
+
+  const r2 = seededRandom(
+    `${dateKey}:${id}:wave2`
+  );
+
+  const r3 = seededRandom(
+    `${dateKey}:${id}:wave3`
+  );
+
+  const power =
+    0.65 +
+    r1 * 1.4;
+
+  let progress = Math.pow(
+    normalized,
+    power
+  );
+
+  const wave1 =
+    Math.sin(
+      normalized *
+        Math.PI *
+        (2 + Math.floor(r2 * 4)) +
+        r2 * Math.PI
+    );
+
+  const wave2 =
+    Math.sin(
+      normalized *
+        Math.PI *
+        (5 + Math.floor(r3 * 5)) +
+        r3 * Math.PI
+    );
+
+  /*
+   * Small deterministic perturbation.
+   */
+  progress +=
+    wave1 * 0.08 * normalized;
+
+  progress +=
+    wave2 * 0.035 * normalized;
+
+  /*
+   * Keep it valid.
+   */
+  progress = Math.min(
+    1,
+    Math.max(0, progress)
+  );
+
+  /*
+   * Smooth the result.
+   */
+  progress = smoothstep(progress);
+
+  /*
+   * IMPORTANT:
+   *
+   * This forces exact endpoints.
+   *
+   * 06:00 = 0
+   * 22:00 = 1
+   */
+  if (normalized <= 0) {
+    return 0;
+  }
+
+  if (normalized >= 1) {
+    return 1;
+  }
+
+  return progress;
+}
+
+function getDisplayedBenchmarkScore(
+  peak: number,
+  id: string,
+  now: number
+): number {
+  if (peak <= 0) {
+    return 0;
+  }
+
+  const progress =
+    randomizedProgress(
+      id,
+      now
+    );
+
+  /*
+   * Floor means the benchmark never exceeds its fixed peak.
+   */
+  return Math.min(
+    peak,
+    Math.floor(
+      peak * progress
+    )
+  );
+}
+
+// ============================================================================
+// LEADERBOARD
+// ============================================================================
+
+interface LeaderboardEntry {
+  id: string;
+  name: string;
+  peak: number;
+  kills: number;
+  isYou: boolean;
+  description: string;
+}
+
+function rankColor(rank: number): string {
   if (rank === 1) {
     return COLORS.chrome;
   }
@@ -660,10 +782,6 @@ function rankColor(
 
   return COLORS.textMuted;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TABS
-// ═══════════════════════════════════════════════════════════════════════════
 
 const TABS: {
   id: SubScreen;
@@ -687,9 +805,9 @@ const TABS: {
   },
 ];
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ============================================================================
 // MAIN COMPONENT
-// ═══════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
 export default function SniperGame() {
   const [ready, setReady] =
@@ -727,6 +845,10 @@ export default function SniperGame() {
   const [rewards, setRewards] =
     useState<RewardItem[]>([]);
 
+  /*
+   * Used to force leaderboard recalculation
+   * every 30 seconds.
+   */
   const [heartbeat, setHeartbeat] =
     useState(0);
 
@@ -740,9 +862,9 @@ export default function SniperGame() {
       null
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // REWARD PAYOUT
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   const grantMinuteRewards =
     useCallback(
@@ -773,35 +895,31 @@ export default function SniperGame() {
           [];
 
         for (
-          let minute =
+          let m =
             progress.lastMinute + 1;
-          minute <=
-          currentMinute;
-          minute++
+          m <= currentMinute;
+          m++
         ) {
           minted.push({
-            id: `${progress.startTime}-${minute}`,
-            code:
-              generateRewardCode(),
+            id: `${progress.startTime}-${m}`,
+            code: generateRewardCode(),
             category,
             earnedAt:
               progress.startTime +
-              minute * 60000,
+              m * 60000,
           });
         }
 
-        setRewards(
-          (previous) => {
-            const next = [
-              ...minted,
-              ...previous,
-            ];
+        setRewards((prev) => {
+          const next = [
+            ...minted,
+            ...prev,
+          ];
 
-            saveRewards(next);
+          saveRewards(next);
 
-            return next;
-          }
-        );
+          return next;
+        });
 
         const updated: RewardProgress =
           {
@@ -821,9 +939,9 @@ export default function SniperGame() {
       []
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // LOAD STATE
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // LOAD
+  // ========================================================================
 
   useEffect(() => {
     setGameState(
@@ -886,9 +1004,9 @@ export default function SniperGame() {
     grantMinuteRewards,
   ]);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // ACTIVE TIMER
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // ACTIVE SESSION TIMER
+  // ========================================================================
 
   useEffect(() => {
     if (
@@ -974,22 +1092,16 @@ export default function SniperGame() {
     grantMinuteRewards,
   ]);
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // LEADERBOARD HEARTBEAT
-  // ═══════════════════════════════════════════════════════════════════════
-  //
-  // Recalculates bot scores every 30 seconds.
-  //
-  // This also makes the 06:00 / 22:00 boundary update automatically.
-  //
+  // ========================================================================
 
   useEffect(() => {
     const id =
       setInterval(
         () =>
           setHeartbeat(
-            (value) =>
-              value + 1
+            (h) => h + 1
           ),
         30000
       );
@@ -998,9 +1110,9 @@ export default function SniperGame() {
       clearInterval(id);
   }, []);
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // START SESSION
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   const startSession =
     useCallback(
@@ -1045,9 +1157,9 @@ export default function SniperGame() {
       []
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // END SESSION
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   const endSession =
     useCallback(() => {
@@ -1090,20 +1202,19 @@ export default function SniperGame() {
         };
 
       setGameState(
-        (previous) => {
+        (prev) => {
           const next: GameState =
             {
               totals: {
-                ...previous.totals,
+                ...prev.totals,
                 [active.category]:
-                  previous.totals[
+                  prev.totals[
                     active.category
                   ] + kills,
               },
-
               sessions: [
                 record,
-                ...previous.sessions,
+                ...prev.sessions,
               ],
             };
 
@@ -1147,9 +1258,9 @@ export default function SniperGame() {
       grantMinuteRewards,
     ]);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // ABORT SESSION
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // ABORT
+  // ========================================================================
 
   const abortSession =
     useCallback(() => {
@@ -1184,9 +1295,9 @@ export default function SniperGame() {
       grantMinuteRewards,
     ]);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // CLOSE RESULT
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // RESULT
+  // ========================================================================
 
   const closeResult =
     useCallback(() => {
@@ -1199,19 +1310,19 @@ export default function SniperGame() {
       );
     }, []);
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // DELETE REWARD
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   const deleteReward =
     useCallback(
       (id: string) => {
         setRewards(
-          (previous) => {
+          (prev) => {
             const next =
-              previous.filter(
-                (reward) =>
-                  reward.id !== id
+              prev.filter(
+                (r) =>
+                  r.id !== id
               );
 
             saveRewards(
@@ -1225,9 +1336,9 @@ export default function SniperGame() {
       []
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // RESET
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   const handleReset =
     useCallback(() => {
@@ -1280,12 +1391,11 @@ export default function SniperGame() {
       );
     }, []);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // TODAY'S DATA
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // CURRENT TIME / DAILY DATA
+  // ========================================================================
 
-  const now =
-    Date.now();
+  const now = Date.now();
 
   const todayTotals =
     computeTodayTotals(
@@ -1307,52 +1417,155 @@ export default function SniperGame() {
         )
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // LEADERBOARD
-  // ═══════════════════════════════════════════════════════════════════════
-  //
-  // YOU is always calculated from the real session history.
-  //
-  // No "best record" logic is performed here.
-  //
-  // Therefore:
-  //
-  //     YOU = today's actual score
-  //
-  // If YOU > every benchmark:
-  //
-  //     YOU becomes rank #1 immediately.
-  //
-  // Historical records are completely independent.
-  //
+  // ========================================================================
 
   const leaderboard =
     useMemo(() => {
-      const entries = [
+      /*
+       * Calculate the fixed historical peaks.
+       */
+
+      const yesterdayBest =
+        getYesterdayBest(
+          gameState.sessions,
+          now
+        );
+
+      const sevenDayBest =
+        getSevenDayBest(
+          gameState.sessions,
+          now
+        );
+
+      const thirtyDayBest =
+        getThirtyDayBest(
+          gameState.sessions,
+          now
+        );
+
+      const personalBest =
+        getPersonalBest(
+          gameState.sessions
+        );
+
+      const monthAverage =
+        getMonthAverage(
+          gameState.sessions,
+          now
+        );
+
+      /*
+       * IMPORTANT:
+       *
+       * These are the PEAKS.
+       *
+       * They are NOT randomized.
+       *
+       * Randomness is applied later only to
+       * the current displayed score.
+       */
+
+      const benchmarks: Omit<
+        LeaderboardEntry,
+        "kills"
+      >[] = [
         {
           id: "you",
           name: "YOU",
-          kills: todaySum,
+          peak: todaySum,
           isYou: true,
+          description:
+            "Your actual score today",
         },
 
-        ...BOTS.map(
-          (bot) => ({
-            id: bot.id,
-            name: bot.name,
-            kills:
-              botKillsNow(
-                bot,
-                now
-              ),
-            isYou: false,
-          })
-        ),
+        {
+          id: "yesterday",
+          name: "YESTERDAY BEST",
+          peak: yesterdayBest,
+          isYou: false,
+          description:
+            "Best daily score yesterday",
+        },
+
+        {
+          id: "7day",
+          name: "7-DAY BEST",
+          peak: sevenDayBest,
+          isYou: false,
+          description:
+            "Best daily score in the last 7 days",
+        },
+
+        {
+          id: "30day",
+          name: "30-DAY BEST",
+          peak: thirtyDayBest,
+          isYou: false,
+          description:
+            "Best daily score in the last 30 days",
+        },
+
+        {
+          id: "personal",
+          name: "PERSONAL BEST",
+          peak: personalBest,
+          isYou: false,
+          description:
+            "Your all-time best day",
+        },
+
+        {
+          id: "monthly-average",
+          name: "MONTH AVERAGE",
+          peak: monthAverage,
+          isYou: false,
+          description:
+            "Average daily score this month",
+        },
+
+        {
+          id: "ideal",
+          name: "IDEAL",
+          peak: IDEAL_KILLS,
+          isYou: false,
+          description:
+            "4 × 90m + 24 × 15m = 12 hours",
+        },
       ];
 
+      /*
+       * YOU is always real.
+       *
+       * The six benchmark entries get their current
+       * display value from the randomized 06:00–22:00
+       * progression.
+       */
+      const entries: LeaderboardEntry[] =
+        benchmarks.map(
+          (entry) => ({
+            ...entry,
+
+            kills:
+              entry.isYou
+                ? todaySum
+                : getDisplayedBenchmarkScore(
+                    entry.peak,
+                    entry.id,
+                    now
+                  ),
+          })
+        );
+
+      /*
+       * Rank from highest → lowest.
+       *
+       * Therefore if YOU gets the highest actual
+       * score today, YOU immediately becomes rank #1.
+       */
       return entries.sort(
         (a, b) => {
-          // Highest score first.
           if (
             b.kills !==
             a.kills
@@ -1363,38 +1576,41 @@ export default function SniperGame() {
             );
           }
 
-          // YOU wins ties.
+          /*
+           * Tie-breaking:
+           *
+           * YOU wins a tie because it represents
+           * actual current performance.
+           */
           if (
-            a.isYou &&
-            !b.isYou
-          ) {
-            return -1;
-          }
-
-          if (
-            !a.isYou &&
+            a.isYou !==
             b.isYou
           ) {
-            return 1;
+            return a.isYou
+              ? -1
+              : 1;
           }
 
-          return a.name.localeCompare(
-            b.name
+          /*
+           * Stable secondary sort:
+           * larger fixed peak wins.
+           */
+          return (
+            b.peak -
+            a.peak
           );
         }
       );
-
-      // now advances through heartbeat and active-session renders.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
+      gameState.sessions,
       todaySum,
       heartbeat,
-      elapsedMs,
+      now,
     ]);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // SORT REWARDS
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // REWARDS SORTING
+  // ========================================================================
 
   const sortedRewards =
     useMemo(
@@ -1411,9 +1627,9 @@ export default function SniperGame() {
       [rewards]
     );
 
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
   // LOADING
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
 
   if (!ready) {
     return (
@@ -1421,8 +1637,7 @@ export default function SniperGame() {
         className="app-shell"
         style={{
           display: "flex",
-          alignItems:
-            "center",
+          alignItems: "center",
           justifyContent:
             "center",
           background:
@@ -1439,9 +1654,9 @@ export default function SniperGame() {
     );
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // UI
-  // ═══════════════════════════════════════════════════════════════════════
+  // ========================================================================
+  // RENDER
+  // ========================================================================
 
   return (
     <div
@@ -1451,8 +1666,7 @@ export default function SniperGame() {
         color:
           COLORS.text,
         maxWidth: 480,
-        margin:
-          "0 auto",
+        margin: "0 auto",
         position:
           "relative",
         overflowX:
@@ -1487,12 +1701,9 @@ export default function SniperGame() {
           borderRight: true,
         },
       ].map(
-        (
-          corner,
-          index
-        ) => (
+        (corner, i) => (
           <div
-            key={index}
+            key={i}
             style={{
               position:
                 "fixed",
@@ -1537,9 +1748,10 @@ export default function SniperGame() {
       )}
 
       <AnimatePresence mode="wait">
-        {/* ════════════════════════════════════════════════════════════════ */}
-        {/* HOME                                                           */}
-        {/* ════════════════════════════════════════════════════════════════ */}
+
+        {/* ================================================================ */}
+        {/* HOME                                                            */}
+        {/* ================================================================ */}
 
         {screen ===
           "home" && (
@@ -1613,8 +1825,7 @@ export default function SniperGame() {
                     FONT_MONO,
                   fontSize:
                     "clamp(36px, 10vw, 44px)",
-                  fontWeight:
-                    700,
+                  fontWeight: 700,
                   marginTop: 10,
                 }}
               >
@@ -1655,9 +1866,7 @@ export default function SniperGame() {
               }}
             >
               {TABS.map(
-                (
-                  tab
-                ) => {
+                (tab) => {
                   const isActive =
                     subScreen ===
                     tab.id;
@@ -1720,9 +1929,10 @@ export default function SniperGame() {
             </div>
 
             <AnimatePresence mode="wait">
-              {/* ═════════════════════════════════════════════════════════ */}
-              {/* BASE                                                       */}
-              {/* ═════════════════════════════════════════════════════════ */}
+
+              {/* ========================================================== */}
+              {/* BASE                                                        */}
+              {/* ========================================================== */}
 
               {subScreen ===
                 "base" && (
@@ -1771,8 +1981,6 @@ export default function SniperGame() {
                     )}
                   </div>
 
-                  {/* TODAY'S SESSIONS */}
-
                   {todaySessions.length >
                     0 && (
                     <div
@@ -1792,8 +2000,7 @@ export default function SniperGame() {
                             "uppercase",
                           letterSpacing:
                             1.5,
-                          marginBottom:
-                            10,
+                          marginBottom: 10,
                         }}
                       >
                         Today&apos;s
@@ -1820,7 +2027,8 @@ export default function SniperGame() {
                             ) => {
                               const meta =
                                 CATEGORY_META[
-                                  session.category
+                                  session
+                                    .category
                                 ];
 
                               return (
@@ -1896,9 +2104,9 @@ export default function SniperGame() {
                 </motion.div>
               )}
 
-              {/* ═════════════════════════════════════════════════════════ */}
-              {/* LEADERBOARD                                               */}
-              {/* ═════════════════════════════════════════════════════════ */}
+              {/* ========================================================== */}
+              {/* LEADERBOARD                                                */}
+              {/* ========================================================== */}
 
               {subScreen ===
                 "leaderboard" && (
@@ -1950,78 +2158,45 @@ export default function SniperGame() {
                           1.4,
                       }}
                     >
-                      Six fixed benchmarks
-                      rise from 06:00 to
-                      22:00 through
-                      randomized
-                      increments. Their
-                      peaks never change.
-                      Your real score can
-                      overtake them
-                      immediately.
-                    </div>
-
-                    {/* TIME WINDOW */}
-
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        justifyContent:
-                          "space-between",
-                        marginTop: 12,
-                        padding:
-                          "8px 10px",
-                        borderRadius: 4,
-                        background:
-                          COLORS.panel,
-                        border:
-                          `1px solid ${COLORS.panelLine}`,
-                        fontFamily:
-                          FONT_MONO,
-                        fontSize: 10,
-                        color:
-                          COLORS.textMuted,
-                      }}
-                    >
-                      <span>
-                        06:00
-                      </span>
-
-                      <span
-                        style={{
-                          color:
-                            COLORS.chrome,
-                        }}
-                      >
-                        RANDOMIZED
-                        DAILY
-                        PROGRESSION
-                      </span>
-
-                      <span>
-                        22:00
-                      </span>
-                    </div>
-
-                    {/* IDEAL */}
-
-                    <div
-                      style={{
-                        marginTop: 8,
-                        fontFamily:
-                          FONT_MONO,
-                        fontSize: 9.5,
-                        color:
-                          COLORS.textMuted,
-                        letterSpacing:
-                          0.5,
-                      }}
-                    >
-                      IDEAL: 4 × 90m +
-                      24 × 15m = 12h
+                      Seven benchmarks.
+                      Fixed peaks.
+                      Randomized
+                      progression
+                      from 06:00 to
+                      22:00.
                     </div>
                   </div>
+
+                  {/* IDEAL SUMMARY */}
+
+                  <div
+                    style={{
+                      marginBottom: 14,
+                      padding:
+                        "10px 12px",
+                      borderRadius: 4,
+                      background:
+                        `${COLORS.chrome}0c`,
+                      border:
+                        `1px solid ${COLORS.chrome}22`,
+                      fontFamily:
+                        FONT_MONO,
+                      fontSize: 10.5,
+                      color:
+                        COLORS.textMuted,
+                    }}
+                  >
+                    IDEAL:{" "}
+                    {IDEAL_BLOCKS_90}
+                    × 90m +{" "}
+                    {IDEAL_BLOCKS_15}
+                    × 15m ={" "}
+                    {IDEAL_MINUTES /
+                      60}
+                    h
+                  </div>
+
+                  {/* RANKINGS */}
 
                   <div
                     style={{
@@ -2042,18 +2217,19 @@ export default function SniperGame() {
                           1;
 
                         return (
-                          <div
+                          <motion.div
                             key={
                               entry.id
                             }
+                            layout
                             style={{
                               display:
                                 "flex",
                               alignItems:
                                 "center",
-                              gap: 12,
+                              gap: 10,
                               padding:
-                                "11px 14px",
+                                "11px 12px",
                               borderRadius:
                                 4,
                               background:
@@ -2063,7 +2239,7 @@ export default function SniperGame() {
                               border:
                                 entry.isYou
                                   ? `1px solid ${COLORS.chrome}66`
-                                  : "1px solid transparent",
+                                  : `1px solid transparent`,
                             }}
                           >
                             {/* RANK */}
@@ -2111,48 +2287,111 @@ export default function SniperGame() {
                             <div
                               style={{
                                 flex: 1,
-                                fontFamily:
-                                  FONT_DISPLAY,
-                                fontWeight:
-                                  entry.isYou
-                                    ? 700
-                                    : 600,
-                                fontSize:
-                                  15,
-                                color:
-                                  entry.isYou
-                                    ? COLORS.chrome
-                                    : COLORS.text,
-                                letterSpacing:
-                                  0.3,
+                                minWidth: 0,
                               }}
                             >
-                              {
-                                entry.name
-                              }
+                              <div
+                                style={{
+                                  fontFamily:
+                                    FONT_DISPLAY,
+                                  fontWeight:
+                                    entry.isYou
+                                      ? 700
+                                      : 600,
+                                  fontSize:
+                                    13.5,
+                                  color:
+                                    entry.isYou
+                                      ? COLORS.chrome
+                                      : COLORS.text,
+                                  letterSpacing:
+                                    0.2,
+                                  whiteSpace:
+                                    "nowrap",
+                                  overflow:
+                                    "hidden",
+                                  textOverflow:
+                                    "ellipsis",
+                                }}
+                              >
+                                {
+                                  entry.name
+                                }
+                              </div>
+
+                              <div
+                                style={{
+                                  fontFamily:
+                                    FONT_MONO,
+                                  fontSize:
+                                    8.5,
+                                  color:
+                                    COLORS.textMuted,
+                                  marginTop: 2,
+                                  whiteSpace:
+                                    "nowrap",
+                                  overflow:
+                                    "hidden",
+                                  textOverflow:
+                                    "ellipsis",
+                                }}
+                              >
+                                {
+                                  entry.description
+                                }
+                              </div>
                             </div>
 
                             {/* SCORE */}
 
                             <div
                               style={{
-                                fontFamily:
-                                  FONT_MONO,
-                                fontSize:
-                                  15,
-                                fontWeight:
-                                  700,
-                                color:
-                                  entry.isYou
-                                    ? COLORS.chrome
-                                    : COLORS.textMuted,
+                                textAlign:
+                                  "right",
+                                flexShrink:
+                                  0,
                               }}
                             >
-                              {
-                                entry.kills
-                              }
+                              <div
+                                style={{
+                                  fontFamily:
+                                    FONT_MONO,
+                                  fontSize:
+                                    15,
+                                  fontWeight:
+                                    700,
+                                  color:
+                                    entry.isYou
+                                      ? COLORS.chrome
+                                      : COLORS.textMuted,
+                                }}
+                              >
+                                {
+                                  entry.kills
+                                }
+                              </div>
+
+                              {!entry.isYou && (
+                                <div
+                                  style={{
+                                    fontFamily:
+                                      FONT_MONO,
+                                    fontSize:
+                                      8,
+                                    color:
+                                      COLORS.textMuted,
+                                    opacity:
+                                      0.65,
+                                  }}
+                                >
+                                  /{" "}
+                                  {
+                                    entry.peak
+                                  }
+                                </div>
+                              )}
                             </div>
-                          </div>
+                          </motion.div>
                         );
                       }
                     )}
@@ -2160,9 +2399,9 @@ export default function SniperGame() {
                 </motion.div>
               )}
 
-              {/* ═════════════════════════════════════════════════════════ */}
-              {/* REWARDS                                                    */}
-              {/* ═════════════════════════════════════════════════════════ */}
+              {/* ========================================================== */}
+              {/* REWARDS                                                     */}
+              {/* ========================================================== */}
 
               {subScreen ===
                 "rewards" && (
@@ -2197,8 +2436,8 @@ export default function SniperGame() {
                           1.5,
                       }}
                     >
-                      Collected
-                      codes |{" "}
+                      Collected codes
+                      {" | "}
                       {
                         sortedRewards.length
                       }{" "}
@@ -2220,10 +2459,13 @@ export default function SniperGame() {
                     >
                       Sorted highest
                       value first —
-                      uppercase outranks
-                      lowercase outranks
-                      digits, so ZZZ is as
-                      good as it gets.
+                      uppercase
+                      outranks
+                      lowercase
+                      outranks
+                      digits, so ZZZ
+                      is as good as
+                      it gets.
                     </div>
                   </div>
 
@@ -2248,8 +2490,9 @@ export default function SniperGame() {
                       }}
                     >
                       No rewards logged
-                      yet. Every minute
-                      in the field earns
+                      yet. Every
+                      minute in the
+                      field earns
                       one.
                     </div>
                   ) : (
@@ -2276,9 +2519,10 @@ export default function SniperGame() {
                                 reward.code
                               );
 
-                            const categoryColor =
+                            const catColor =
                               CATEGORY_META[
-                                reward.category
+                                reward
+                                  .category
                               ].color;
 
                             return (
@@ -2327,7 +2571,7 @@ export default function SniperGame() {
                                     borderRadius:
                                       "50%",
                                     background:
-                                      categoryColor,
+                                      catColor,
                                     flexShrink:
                                       0,
                                   }}
@@ -2337,8 +2581,7 @@ export default function SniperGame() {
                                 <div
                                   style={{
                                     flex: 1,
-                                    minWidth:
-                                      0,
+                                    minWidth: 0,
                                   }}
                                 >
                                   <div
@@ -2482,9 +2725,9 @@ export default function SniperGame() {
           </motion.div>
         )}
 
-        {/* ═════════════════════════════════════════════════════════════════ */}
-        {/* ACTIVE SESSION                                                   */}
-        {/* ═════════════════════════════════════════════════════════════════ */}
+        {/* ================================================================ */}
+        {/* ACTIVE                                                           */}
+        {/* ================================================================ */}
 
         {screen ===
           "active" &&
@@ -2511,9 +2754,9 @@ export default function SniperGame() {
             />
           )}
 
-        {/* ═════════════════════════════════════════════════════════════════ */}
+        {/* ================================================================ */}
         {/* RESULT                                                           */}
-        {/* ═════════════════════════════════════════════════════════════════ */}
+        {/* ================================================================ */}
 
         {screen ===
           "result" &&
