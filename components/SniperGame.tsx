@@ -2159,12 +2159,11 @@ export default function SniperGame() {
                     }}
                   >
                     IDEAL:{" "}
-                    {IDEAL_BLOCKS_90}
+                    {"4"}
                     × 90m +{" "}
-                    {IDEAL_BLOCKS_15}
-                    × 15m ={" "}
-                    {IDEAL_MINUTES /
-                      60}
+                    {"12"}
+                    × 30m ={" "}
+                    {"12"}
                     h
                   </div>
 
