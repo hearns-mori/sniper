@@ -2,32 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Pause, Play, X, Target, Crosshair, Zap } from "lucide-react";
+import {
+  X,
+  Play,
+  Zap,
+  Trophy,
+  TrendingUp,
+  MousePointerClick,
+  ArrowUpCircle,
+} from "lucide-react";
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
-import {
-  getCombatStats,
-  levelFromTotalKills,
-  computeAccuracy,
-  computeScore,
-  MATCH_DURATION_MS,
-} from "@/lib/shooterProgression";
-import type { CombatStats } from "@/lib/shooterProgression";
-import {
-  loadShooterHighScores,
-  recordShooterMatch,
-} from "@/lib/shooterStorage";
-import type {
-  MatchMode,
-  ShooterHighScores,
-  ShooterMatchResult,
-} from "@/lib/shooterStorage";
-import type {
-  ShooterEndResult,
-  ShooterHudSnapshot,
-} from "@/lib/ShooterScene";
 
-type Phase = "menu" | "countdown" | "playing" | "paused" | "results";
+type Phase = "menu" | "playing";
 
 interface PhaserShooterProps {
   /** Lifetime kills across all productivity categories — powers the level. */
@@ -35,395 +22,318 @@ interface PhaserShooterProps {
   onExit: () => void;
 }
 
-interface SceneHandle {
-  setMoveVector: (x: number, y: number) => void;
-  setAimVector: (x: number, y: number) => void;
-  setFiring: (firing: boolean) => void;
-  setPaused: (paused: boolean) => void;
-}
-
-const CANVAS_HEIGHT = 560;
-
 // ============================================================================
-// VIRTUAL STICK (shared implementation for move + aim pads)
+// PERSISTED STATE
 // ============================================================================
 
-interface StickState {
-  active: boolean;
-  originX: number;
-  originY: number;
-  dx: number;
-  dy: number;
+interface Milestones {
+  m50: boolean;
+  m75: boolean;
+  m100: boolean;
 }
 
-const STICK_RADIUS = 46;
+interface TapGameState {
+  lastPlayDate: string; // Date#toDateString() — drives the daily reset
+  balance: number; // spendable points (goes down when buying upgrades)
+  scoreToday: number; // cumulative points earned today (never decreases)
+  tapLevel: number;
+  perSecondLevel: number;
+  personalBest: number; // live all-time high of scoreToday
+  targetBest: number; // personalBest as of the start of today — frozen goal
+  milestonesToday: Milestones;
+}
 
-function useVirtualStick(onVector: (x: number, y: number) => void) {
-  const [state, setState] = useState<StickState>({
-    active: false,
-    originX: 0,
-    originY: 0,
-    dx: 0,
-    dy: 0,
-  });
+const STORAGE_KEY = "tapgame_state_v1";
 
-  const touchIdRef = useRef<number | null>(null);
+function todayKey(): string {
+  return new Date().toDateString();
+}
 
-  const handleStart = useCallback((clientX: number, clientY: number, id: number) => {
-    touchIdRef.current = id;
-    setState({ active: true, originX: clientX, originY: clientY, dx: 0, dy: 0 });
-  }, []);
+function defaultState(carry?: { personalBest: number; targetBest: number }): TapGameState {
+  return {
+    lastPlayDate: todayKey(),
+    balance: 0,
+    scoreToday: 0,
+    tapLevel: 0,
+    perSecondLevel: 0,
+    personalBest: carry?.personalBest ?? 0,
+    targetBest: carry?.targetBest ?? 0,
+    milestonesToday: { m50: false, m75: false, m100: false },
+  };
+}
 
-  const handleMove = useCallback(
-    (clientX: number, clientY: number, id: number) => {
-      if (touchIdRef.current !== id) return;
-
-      setState((prev) => {
-        if (!prev.active) return prev;
-
-        let dx = clientX - prev.originX;
-        let dy = clientY - prev.originY;
-        const len = Math.hypot(dx, dy);
-
-        if (len > STICK_RADIUS) {
-          dx = (dx / len) * STICK_RADIUS;
-          dy = (dy / len) * STICK_RADIUS;
-        }
-
-        const nx = dx / STICK_RADIUS;
-        const ny = dy / STICK_RADIUS;
-
-        onVector(nx, ny);
-
-        return { ...prev, dx, dy };
+function loadState(): TapGameState {
+  if (typeof window === "undefined") return defaultState();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultState();
+    const parsed = JSON.parse(raw) as Partial<TapGameState>;
+    if (parsed.lastPlayDate !== todayKey()) {
+      // New day: points and upgrades reset, personal best carries over and
+      // becomes the frozen goal for today.
+      return defaultState({
+        personalBest: parsed.personalBest ?? 0,
+        targetBest: parsed.personalBest ?? 0,
       });
-    },
-    [onVector]
-  );
-
-  const handleEnd = useCallback(
-    (id: number) => {
-      if (touchIdRef.current !== id) return;
-      touchIdRef.current = null;
-      onVector(0, 0);
-      setState({ active: false, originX: 0, originY: 0, dx: 0, dy: 0 });
-    },
-    [onVector]
-  );
-
-  return { state, handleStart, handleMove, handleEnd };
+    }
+    return { ...defaultState(), ...parsed, lastPlayDate: todayKey() };
+  } catch {
+    return defaultState();
+  }
 }
 
-function StickPad({
-  label,
-  stick,
-  onStart,
-  onMove,
-  onEnd,
-  accent,
-}: {
-  label: string;
-  stick: StickState;
-  onStart: (x: number, y: number, id: number) => void;
-  onMove: (x: number, y: number, id: number) => void;
-  onEnd: (id: number) => void;
-  accent: string;
-}) {
-  const padRef = useRef<HTMLDivElement>(null);
+function saveState(state: TapGameState) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore quota / privacy-mode errors
+  }
+}
 
-  return (
-    <div
-      ref={padRef}
-      onTouchStart={(e) => {
-        e.preventDefault();
-        const t = e.changedTouches[0];
-        onStart(t.clientX, t.clientY, t.identifier);
-      }}
-      onTouchMove={(e) => {
-        e.preventDefault();
-        for (const t of Array.from(e.changedTouches)) {
-          onMove(t.clientX, t.clientY, t.identifier);
-        }
-      }}
-      onTouchEnd={(e) => {
-        e.preventDefault();
-        for (const t of Array.from(e.changedTouches)) {
-          onEnd(t.identifier);
-        }
-      }}
-      onMouseDown={(e) => {
-        onStart(e.clientX, e.clientY, -1);
-      }}
-      onMouseMove={(e) => {
-        if (stick.active) onMove(e.clientX, e.clientY, -1);
-      }}
-      onMouseUp={() => onEnd(-1)}
-      onMouseLeave={() => {
-        if (stick.active) onEnd(-1);
-      }}
-      style={{
-        position: "relative",
-        width: 108,
-        height: 108,
-        borderRadius: "50%",
-        background: `${COLORS.panel}cc`,
-        border: `1px solid ${accent}55`,
-        touchAction: "none",
-        userSelect: "none",
-        flexShrink: 0,
-      }}
-    >
-      <div
-        style={{
-          position: "absolute",
-          top: 6,
-          left: 0,
-          right: 0,
-          textAlign: "center",
-          fontFamily: FONT_MONO,
-          fontSize: 8,
-          letterSpacing: 1,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-          pointerEvents: "none",
-        }}
-      >
-        {label}
-      </div>
+function applyPoints(prev: TapGameState, amount: number): TapGameState {
+  if (amount <= 0) return prev;
 
-      <div
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: "50%",
-          width: 40,
-          height: 40,
-          borderRadius: "50%",
-          background: accent,
-          opacity: stick.active ? 0.9 : 0.45,
-          transform: `translate(calc(-50% + ${stick.dx}px), calc(-50% + ${stick.dy}px))`,
-          pointerEvents: "none",
-          transition: stick.active ? "none" : "transform 120ms ease-out",
-        }}
-      />
-    </div>
-  );
+  const scoreToday = prev.scoreToday + amount;
+  const balance = prev.balance + amount;
+  const personalBest = scoreToday > prev.personalBest ? scoreToday : prev.personalBest;
+
+  let milestonesToday = prev.milestonesToday;
+  if (prev.targetBest > 0) {
+    const m50 = milestonesToday.m50 || scoreToday >= prev.targetBest * 0.5;
+    const m75 = milestonesToday.m75 || scoreToday >= prev.targetBest * 0.75;
+    const m100 = milestonesToday.m100 || scoreToday >= prev.targetBest;
+    if (m50 !== milestonesToday.m50 || m75 !== milestonesToday.m75 || m100 !== milestonesToday.m100) {
+      milestonesToday = { m50, m75, m100 };
+    }
+  }
+
+  return { ...prev, balance, scoreToday, personalBest, milestonesToday };
+}
+
+// ============================================================================
+// LEVEL CURVE — lifetimeKills drives an account level that exponentially
+// boosts tap power. This does NOT reset daily; it only grows with the app.
+// ============================================================================
+
+interface LevelInfo {
+  level: number;
+  xpIntoLevel: number;
+  xpForNextLevel: number;
+  tapMultiplier: number;
+}
+
+function xpForLevel(level: number): number {
+  return Math.round(60 * Math.pow(level, 1.55));
+}
+
+function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
+  let level = 1;
+  let xp = Math.max(0, Math.floor(lifetimeKills));
+  while (xp >= xpForLevel(level)) {
+    xp -= xpForLevel(level);
+    level += 1;
+  }
+  return {
+    level,
+    xpIntoLevel: xp,
+    xpForNextLevel: xpForLevel(level),
+    tapMultiplier: Math.pow(1.12, level - 1),
+  };
+}
+
+// ============================================================================
+// SHOP ECONOMY
+// ============================================================================
+
+const TAP_BASE_COST = 10;
+const TAP_COST_GROWTH = 1.16;
+const TAP_VALUE_PER_LEVEL = 1;
+
+const DPS_BASE_COST = 25;
+const DPS_COST_GROWTH = 1.2;
+const DPS_VALUE_PER_LEVEL = 1;
+
+function tapUpgradeCost(level: number): number {
+  return Math.round(TAP_BASE_COST * Math.pow(TAP_COST_GROWTH, level));
+}
+
+function dpsUpgradeCost(level: number): number {
+  return Math.round(DPS_BASE_COST * Math.pow(DPS_COST_GROWTH, level));
+}
+
+function computeTapValue(tapLevel: number, tapMultiplier: number): number {
+  return Math.max(1, Math.round((1 + tapLevel * TAP_VALUE_PER_LEVEL) * tapMultiplier));
+}
+
+function computePerSecondValue(perSecondLevel: number): number {
+  return perSecondLevel * DPS_VALUE_PER_LEVEL;
+}
+
+// ============================================================================
+// FORMATTING
+// ============================================================================
+
+function formatPoints(n: number): string {
+  const rounded = Math.round(n);
+  if (rounded < 1000) return rounded.toString();
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }).format(rounded);
+}
+
+function formatCountdown(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}h ${m.toString().padStart(2, "0")}m`;
 }
 
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
 
-export default function PhaserShooter({
-  lifetimeKills,
-  onExit,
-}: PhaserShooterProps) {
+let tapBurstId = 0;
+
+export default function PhaserShooter({ lifetimeKills, onExit }: PhaserShooterProps) {
   const [phase, setPhase] = useState<Phase>("menu");
-  const [mode, setMode] = useState<MatchMode>("casual");
-  const [countdownValue, setCountdownValue] = useState(3);
-  const [hud, setHud] = useState<ShooterHudSnapshot | null>(null);
-  const [result, setResult] = useState<ShooterMatchResult | null>(null);
-  const [isNewHighScore, setIsNewHighScore] = useState(false);
-  const [highScores, setHighScores] = useState<ShooterHighScores>(() =>
-    loadShooterHighScores()
+  const [state, setState] = useState<TapGameState>(() => defaultState());
+  const [hydrated, setHydrated] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const [toast, setToast] = useState<string | null>(null);
+  const [tapBursts, setTapBursts] = useState<
+    { id: number; x: number; y: number; value: number }[]
+  >([]);
+
+  const tapButtonRef = useRef<HTMLButtonElement>(null);
+  const prevMilestonesRef = useRef<Milestones>(state.milestonesToday);
+
+  const levelInfo = useMemo(() => levelFromLifetimeKills(lifetimeKills), [lifetimeKills]);
+  const tapValue = useMemo(
+    () => computeTapValue(state.tapLevel, levelInfo.tapMultiplier),
+    [state.tapLevel, levelInfo.tapMultiplier]
   );
-  const [hitFlash, setHitFlash] = useState(false);
-
-  const canvasHostRef = useRef<HTMLDivElement>(null);
-  const gameRef = useRef<import("phaser").Game | null>(null);
-  const sceneRef = useRef<SceneHandle | null>(null);
-
-  const levelInfo = useMemo(
-    () => levelFromTotalKills(lifetimeKills),
-    [lifetimeKills]
-  );
-
-  const combatStats: CombatStats = useMemo(
-    () => getCombatStats(levelInfo.level, mode),
-    [levelInfo.level, mode]
+  const perSecondValue = useMemo(
+    () => computePerSecondValue(state.perSecondLevel),
+    [state.perSecondLevel]
   );
 
   // ==========================================================================
-  // TOUCH CONTROLS -> SCENE
+  // LOAD / SAVE / DAILY RESET
   // ==========================================================================
 
-  const moveStick = useVirtualStick((x, y) => {
-    sceneRef.current?.setMoveVector(x, y);
-  });
+  useEffect(() => {
+    setState(loadState());
+    setHydrated(true);
+  }, []);
 
-  const aimStick = useVirtualStick((x, y) => {
-    const len = Math.hypot(x, y);
-    sceneRef.current?.setAimVector(x, y);
-    sceneRef.current?.setFiring(len > 0.15);
-  });
+  useEffect(() => {
+    if (!hydrated) return;
+    saveState(state);
+  }, [state, hydrated]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    setState((prev) => {
+      if (prev.lastPlayDate === todayKey()) return prev;
+      return defaultState({ personalBest: prev.personalBest, targetBest: prev.personalBest });
+    });
+  }, [now]);
+
+  const msUntilReset = useMemo(() => {
+    const next = new Date();
+    next.setHours(24, 0, 0, 0);
+    return next.getTime() - now;
+  }, [now]);
 
   // ==========================================================================
-  // LAUNCH PHASER once we enter "playing"
+  // PASSIVE INCOME (points per second)
   // ==========================================================================
 
   useEffect(() => {
     if (phase !== "playing") return;
-    if (!canvasHostRef.current) return;
-    if (gameRef.current) return;
-
-    let cancelled = false;
-
-    (async () => {
-      const Phaser = await import("phaser");
-      const { ShooterScene } = await import("@/lib/ShooterScene");
-
-      if (cancelled || !canvasHostRef.current) return;
-
-      const width = canvasHostRef.current.clientWidth || 360;
-
-      const game = new Phaser.Game({
-        type: Phaser.AUTO,
-        parent: canvasHostRef.current,
-        width,
-        height: CANVAS_HEIGHT,
-        backgroundColor: "#0b0d0c",
-        physics: {
-          default: "arcade",
-          arcade: { gravity: { x: 0, y: 0 }, debug: false },
-        },
-        scene: [ShooterScene],
-      });
-
-      game.scene.start("ShooterScene", {
-        combatStats,
-        onHudUpdate: (snapshot: ShooterHudSnapshot) => setHud(snapshot),
-        onPlayerHit: () => {
-          setHitFlash(true);
-          setTimeout(() => setHitFlash(false), 150);
-        },
-        onMatchEnd: (endResult: ShooterEndResult) => {
-          const accuracy = computeAccuracy(
-            endResult.shotsFired,
-            endResult.shotsHit
-          );
-          const score = computeScore(endResult);
-
-          const record: ShooterMatchResult = {
-            id: `${Date.now()}`,
-            playedAt: Date.now(),
-            mode,
-            kills: endResult.kills,
-            shotsFired: endResult.shotsFired,
-            shotsHit: endResult.shotsHit,
-            accuracy,
-            score,
-            survived: endResult.survived,
-            durationMs: endResult.durationMs,
-            levelAtPlay: levelInfo.level,
-          };
-
-          const { data, isNewHighScore: isNew } = recordShooterMatch(record);
-
-          setHighScores(data);
-          setResult(record);
-          setIsNewHighScore(isNew);
-          setPhase("results");
-        },
-      });
-
-      gameRef.current = game;
-      sceneRef.current = {
-        setMoveVector: (x, y) => {
-          const scene = game.scene.getScene("ShooterScene") as any;
-          scene?.setMoveVector?.(x, y);
-        },
-        setAimVector: (x, y) => {
-          const scene = game.scene.getScene("ShooterScene") as any;
-          scene?.setAimVector?.(x, y);
-        },
-        setFiring: (firing) => {
-          const scene = game.scene.getScene("ShooterScene") as any;
-          scene?.setFiring?.(firing);
-        },
-        setPaused: (paused) => {
-          const scene = game.scene.getScene("ShooterScene") as any;
-          scene?.setPaused?.(paused);
-        },
-      };
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // combatStats/mode intentionally excluded: they're captured at launch
-    // time via init() and shouldn't hot-swap mid-match.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
-
-  // Tear down Phaser fully whenever we leave the playing/paused phases.
-  useEffect(() => {
-    if (phase === "playing" || phase === "paused") return;
-
-    if (gameRef.current) {
-      gameRef.current.destroy(true);
-      gameRef.current = null;
-      sceneRef.current = null;
-    }
-  }, [phase]);
-
-  useEffect(() => {
-    return () => {
-      if (gameRef.current) {
-        gameRef.current.destroy(true);
-        gameRef.current = null;
-      }
-    };
-  }, []);
-
-  // ==========================================================================
-  // COUNTDOWN
-  // ==========================================================================
-
-  useEffect(() => {
-    if (phase !== "countdown") return;
-
-    setCountdownValue(3);
-
+    if (perSecondValue <= 0) return;
     const id = setInterval(() => {
-      setCountdownValue((v) => {
-        if (v <= 1) {
-          clearInterval(id);
-          setPhase("playing");
-          return 0;
-        }
-        return v - 1;
-      });
-    }, 700);
-
+      setState((prev) => applyPoints(prev, perSecondValue));
+    }, 1000);
     return () => clearInterval(id);
-  }, [phase]);
+  }, [phase, perSecondValue]);
+
+  // ==========================================================================
+  // MILESTONE TOASTS
+  // ==========================================================================
+
+  useEffect(() => {
+    const prev = prevMilestonesRef.current;
+    const curr = state.milestonesToday;
+    if (!prev.m100 && curr.m100) setToast("New personal best!");
+    else if (!prev.m75 && curr.m75) setToast("75% of your best — almost there!");
+    else if (!prev.m50 && curr.m50) setToast("Halfway to your best!");
+    prevMilestonesRef.current = curr;
+  }, [state.milestonesToday]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 2200);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   // ==========================================================================
   // ACTIONS
   // ==========================================================================
 
-  const startMatch = useCallback((selectedMode: MatchMode) => {
-    setMode(selectedMode);
-    setResult(null);
-    setHud(null);
-    setPhase("countdown");
-  }, []);
+  const handleTap = useCallback(
+    (clientX: number, clientY: number) => {
+      setState((prev) => applyPoints(prev, tapValue));
 
-  const togglePause = useCallback(() => {
-    setPhase((prev) => {
-      const next = prev === "playing" ? "paused" : "playing";
-      sceneRef.current?.setPaused(next === "paused");
-      return next;
+      const rect = tapButtonRef.current?.getBoundingClientRect();
+      const id = tapBurstId++;
+      setTapBursts((prev) => [
+        ...prev,
+        {
+          id,
+          x: rect ? clientX - rect.left : 0,
+          y: rect ? clientY - rect.top : 0,
+          value: tapValue,
+        },
+      ]);
+      setTimeout(() => {
+        setTapBursts((prev) => prev.filter((b) => b.id !== id));
+      }, 650);
+    },
+    [tapValue]
+  );
+
+  const buyTapUpgrade = useCallback(() => {
+    setState((prev) => {
+      const cost = tapUpgradeCost(prev.tapLevel);
+      if (prev.balance < cost) return prev;
+      return { ...prev, balance: prev.balance - cost, tapLevel: prev.tapLevel + 1 };
     });
   }, []);
 
-  const quitToMenu = useCallback(() => {
-    setPhase("menu");
-    setHud(null);
-    setResult(null);
+  const buyDpsUpgrade = useCallback(() => {
+    setState((prev) => {
+      const cost = dpsUpgradeCost(prev.perSecondLevel);
+      if (prev.balance < cost) return prev;
+      return { ...prev, balance: prev.balance - cost, perSecondLevel: prev.perSecondLevel + 1 };
+    });
   }, []);
 
-  const bestForMode = mode === "casual" ? highScores.casual : highScores.ranked;
+  const startPlaying = useCallback(() => setPhase("playing"), []);
+  const backToMenu = useCallback(() => setPhase("menu"), []);
+
+  const tapUpgradeCostNow = tapUpgradeCost(state.tapLevel);
+  const dpsUpgradeCostNow = dpsUpgradeCost(state.perSecondLevel);
+  const nextTapValue = computeTapValue(state.tapLevel + 1, levelInfo.tapMultiplier);
+  const nextPerSecondValue = computePerSecondValue(state.perSecondLevel + 1);
+
+  const progressPct = state.targetBest > 0 ? Math.min(1, state.scoreToday / state.targetBest) : 0;
 
   // ==========================================================================
   // RENDER
@@ -434,237 +344,279 @@ export default function PhaserShooter({
       <AnimatePresence mode="wait">
         {phase === "menu" && (
           <motion.div
-            key="shooter-menu"
+            key="tap-menu"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
             <MenuScreen
               levelInfo={levelInfo}
-              highScores={highScores}
-              onStart={startMatch}
+              state={state}
+              hydrated={hydrated}
+              onStart={startPlaying}
             />
           </motion.div>
         )}
 
-        {(phase === "countdown" ||
-          phase === "playing" ||
-          phase === "paused") && (
+        {phase === "playing" && (
           <motion.div
-            key="shooter-play"
+            key="tap-play"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            style={{ position: "relative" }}
           >
-            {/* HUD BAR */}
+            {/* HEADER */}
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                marginBottom: 8,
+                marginBottom: 10,
                 padding: "0 2px",
               }}
             >
-              <HpBar hp={hud?.hp ?? combatStats.maxHp} maxHp={combatStats.maxHp} />
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Zap size={13} color={COLORS.chrome} />
+                <span
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 11,
+                    color: COLORS.textMuted,
+                  }}
+                >
+                  Lv {levelInfo.level}
+                </span>
+              </div>
 
               <div
                 style={{
                   fontFamily: FONT_MONO,
-                  fontSize: 20,
-                  fontWeight: 700,
-                  color: COLORS.chrome,
-                  letterSpacing: 1,
+                  fontSize: 10,
+                  color: COLORS.textMuted,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
                 }}
               >
-                {formatClock(hud?.remainingMs ?? MATCH_DURATION_MS)}
+                Resets in {formatCountdown(msUntilReset)}
               </div>
+
+              <button
+                onClick={backToMenu}
+                aria-label="Back to menu"
+                style={{
+                  width: 30,
+                  height: 30,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 4,
+                  border: `1px solid ${COLORS.panelLine}`,
+                  background: COLORS.panel,
+                  color: COLORS.text,
+                  cursor: "pointer",
+                }}
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* SCORE */}
+            <div
+              style={{
+                padding: "18px 16px",
+                borderRadius: 6,
+                background: COLORS.panel,
+                border: `1px solid ${COLORS.panelLine}`,
+                textAlign: "center",
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 10,
+                  color: COLORS.textMuted,
+                  textTransform: "uppercase",
+                  letterSpacing: 1.5,
+                }}
+              >
+                Today&apos;s score
+              </div>
+              <motion.div
+                key={Math.floor(state.scoreToday / 10)}
+                initial={{ scale: 1.04 }}
+                animate={{ scale: 1 }}
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 42,
+                  fontWeight: 700,
+                  color: COLORS.text,
+                  marginTop: 4,
+                }}
+              >
+                {formatPoints(state.scoreToday)}
+              </motion.div>
 
               <div
                 style={{
                   display: "flex",
-                  alignItems: "center",
-                  gap: 10,
+                  justifyContent: "center",
+                  gap: 18,
+                  marginTop: 10,
+                  fontFamily: FONT_MONO,
+                  fontSize: 10.5,
+                  color: COLORS.textMuted,
                 }}
               >
-                <div style={{ textAlign: "right" }}>
-                  <div
-                    style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 15,
-                      fontWeight: 700,
-                      color: COLORS.text,
-                    }}
-                  >
-                    {hud?.kills ?? 0}
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 8,
-                      color: COLORS.textMuted,
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    kills
-                  </div>
-                </div>
-
-                <button
-                  onClick={togglePause}
-                  aria-label={phase === "paused" ? "Resume" : "Pause"}
-                  style={{
-                    width: 34,
-                    height: 34,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    borderRadius: 4,
-                    border: `1px solid ${COLORS.panelLine}`,
-                    background: COLORS.panel,
-                    color: COLORS.text,
-                    cursor: "pointer",
-                  }}
-                >
-                  {phase === "paused" ? <Play size={15} /> : <Pause size={15} />}
-                </button>
+                <span>{formatPoints(state.balance)} to spend</span>
+                {perSecondValue > 0 && <span>+{formatPoints(perSecondValue)}/sec</span>}
               </div>
+
+              <MilestoneBar
+                progressPct={progressPct}
+                targetBest={state.targetBest}
+                milestones={state.milestonesToday}
+              />
             </div>
 
-            {/* CANVAS */}
+            {/* TAP BUTTON */}
             <div
               style={{
                 position: "relative",
-                borderRadius: 6,
-                overflow: "hidden",
-                border: `1px solid ${COLORS.panelLine}`,
-                boxShadow: hitFlash
-                  ? `inset 0 0 0 3px #ff4d4d99`
-                  : `inset 0 0 0 1px transparent`,
-                transition: "box-shadow 100ms ease-out",
+                display: "flex",
+                justifyContent: "center",
+                margin: "22px 0 20px",
               }}
             >
-              <div ref={canvasHostRef} style={{ width: "100%", height: CANVAS_HEIGHT }} />
-
-              {phase === "countdown" && (
-                <div
+              <motion.button
+                ref={tapButtonRef}
+                onClick={(e) => handleTap(e.clientX, e.clientY)}
+                whileTap={{ scale: 0.93 }}
+                style={{
+                  width: 156,
+                  height: 156,
+                  borderRadius: "50%",
+                  border: "none",
+                  background: COLORS.chrome,
+                  color: COLORS.void,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 4,
+                  cursor: "pointer",
+                  boxShadow: `0 0 0 6px ${COLORS.panel}, 0 0 24px ${COLORS.chrome}55`,
+                }}
+              >
+                <MousePointerClick size={34} />
+                <span
                   style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "#0b0d0ccc",
+                    fontFamily: FONT_DISPLAY,
+                    fontWeight: 700,
+                    fontSize: 15,
+                    letterSpacing: 1,
+                    textTransform: "uppercase",
                   }}
                 >
+                  Tap
+                </span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 11, opacity: 0.75 }}>
+                  +{formatPoints(tapValue)}
+                </span>
+              </motion.button>
+
+              <AnimatePresence>
+                {tapBursts.map((b) => (
                   <motion.div
-                    key={countdownValue}
-                    initial={{ scale: 1.6, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
+                    key={b.id}
+                    initial={{ opacity: 1, y: 0 }}
+                    animate={{ opacity: 0, y: -54 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.6, ease: "easeOut" }}
                     style={{
+                      position: "absolute",
+                      left: b.x,
+                      top: b.y,
+                      pointerEvents: "none",
                       fontFamily: FONT_MONO,
-                      fontSize: 64,
                       fontWeight: 700,
+                      fontSize: 15,
                       color: COLORS.chrome,
                     }}
                   >
-                    {countdownValue}
+                    +{formatPoints(b.value)}
                   </motion.div>
-                </div>
-              )}
-
-              {phase === "paused" && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 16,
-                    background: "#0b0d0cdd",
-                  }}
-                >
-                  <div
-                    style={{
-                      fontFamily: FONT_DISPLAY,
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: COLORS.text,
-                      letterSpacing: 1,
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Paused
-                  </div>
-
-                  <button
-                    onClick={togglePause}
-                    style={pauseMenuButtonStyle(COLORS.chrome, COLORS.void)}
-                  >
-                    Resume
-                  </button>
-
-                  <button
-                    onClick={quitToMenu}
-                    style={pauseMenuButtonStyle("transparent", COLORS.textMuted, COLORS.panelLine)}
-                  >
-                    Quit match
-                  </button>
-                </div>
-              )}
+                ))}
+              </AnimatePresence>
             </div>
 
-            {/* TOUCH CONTROLS */}
-            {(phase === "playing") && (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginTop: 14,
-                  padding: "0 4px",
-                }}
-              >
-                <StickPad
-                  label="move"
-                  stick={moveStick.state}
-                  onStart={moveStick.handleStart}
-                  onMove={moveStick.handleMove}
-                  onEnd={moveStick.handleEnd}
-                  accent={COLORS.chrome}
-                />
+            {/* SHOP */}
+            <div
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10.5,
+                color: COLORS.textMuted,
+                textTransform: "uppercase",
+                letterSpacing: 1.5,
+                marginBottom: 10,
+              }}
+            >
+              Shop — resets daily
+            </div>
 
-                <StickPad
-                  label="aim / fire"
-                  stick={aimStick.state}
-                  onStart={aimStick.handleStart}
-                  onMove={aimStick.handleMove}
-                  onEnd={aimStick.handleEnd}
-                  accent="#d6453d"
-                />
-              </div>
-            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <ShopCard
+                icon={<MousePointerClick size={18} color={COLORS.chrome} />}
+                title="Tap power"
+                level={state.tapLevel}
+                description={`Each tap earns +${formatPoints(nextTapValue - tapValue)} more`}
+                currentLabel={`+${formatPoints(tapValue)} / tap`}
+                cost={tapUpgradeCostNow}
+                canAfford={state.balance >= tapUpgradeCostNow}
+                accent={COLORS.chrome}
+                onBuy={buyTapUpgrade}
+              />
+
+              <ShopCard
+                icon={<TrendingUp size={18} color="#7fd48a" />}
+                title="Auto-collect"
+                level={state.perSecondLevel}
+                description={`Passive income +${formatPoints(
+                  nextPerSecondValue - perSecondValue
+                )}/sec more`}
+                currentLabel={`+${formatPoints(perSecondValue)} / sec`}
+                cost={dpsUpgradeCostNow}
+                canAfford={state.balance >= dpsUpgradeCostNow}
+                accent="#7fd48a"
+                onBuy={buyDpsUpgrade}
+              />
+            </div>
           </motion.div>
         )}
+      </AnimatePresence>
 
-        {phase === "results" && result && (
+      <AnimatePresence>
+        {toast && (
           <motion.div
-            key="shooter-results"
-            initial={{ opacity: 0, y: 12 }}
+            initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            style={{
+              position: "absolute",
+              top: -6,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "8px 14px",
+              borderRadius: 20,
+              background: COLORS.chrome,
+              color: COLORS.void,
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+              zIndex: 10,
+            }}
           >
-            <ResultsScreen
-              result={result}
-              isNewHighScore={isNewHighScore}
-              bestForMode={bestForMode}
-              onPlayAgain={() => startMatch(result.mode)}
-              onExit={onExit}
-              onBackToMenu={quitToMenu}
-            />
+            {toast}
           </motion.div>
         )}
       </AnimatePresence>
@@ -689,7 +641,7 @@ export default function PhaserShooter({
           }}
         >
           <X size={12} />
-          Exit to base
+          Exit
         </button>
       )}
     </div>
@@ -700,17 +652,38 @@ export default function PhaserShooter({
 // SUBCOMPONENTS
 // ============================================================================
 
-function HpBar({ hp, maxHp }: { hp: number; maxHp: number }) {
-  const pct = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
-  const color = pct > 0.5 ? "#7fd48a" : pct > 0.25 ? "#e0b84a" : "#d6453d";
-
-  return (
-    <div style={{ width: 92 }}>
+function MilestoneBar({
+  progressPct,
+  targetBest,
+  milestones,
+}: {
+  progressPct: number;
+  targetBest: number;
+  milestones: Milestones;
+}) {
+  if (targetBest <= 0) {
+    return (
       <div
         style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9.5,
+          color: COLORS.textMuted,
+          marginTop: 14,
+        }}
+      >
+        No personal best yet — today sets the bar.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div
+        style={{
+          position: "relative",
           height: 8,
           borderRadius: 4,
-          background: COLORS.panel,
+          background: COLORS.void,
           border: `1px solid ${COLORS.panelLine}`,
           overflow: "hidden",
         }}
@@ -718,68 +691,174 @@ function HpBar({ hp, maxHp }: { hp: number; maxHp: number }) {
         <div
           style={{
             height: "100%",
-            width: `${pct * 100}%`,
-            background: color,
-            transition: "width 150ms ease-out, background 150ms ease-out",
+            width: `${progressPct * 100}%`,
+            background: milestones.m100 ? "#7fd48a" : COLORS.chrome,
+            transition: "width 200ms ease-out",
           }}
         />
       </div>
       <div
         style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginTop: 5,
           fontFamily: FONT_MONO,
-          fontSize: 8,
+          fontSize: 8.5,
           color: COLORS.textMuted,
-          marginTop: 2,
         }}
       >
-        {Math.max(0, Math.round(hp))} / {maxHp} HP
+        <span style={{ color: milestones.m50 ? COLORS.chrome : COLORS.textMuted }}>50%</span>
+        <span style={{ color: milestones.m75 ? COLORS.chrome : COLORS.textMuted }}>75%</span>
+        <span style={{ color: milestones.m100 ? "#7fd48a" : COLORS.textMuted }}>100%</span>
       </div>
     </div>
   );
 }
 
-function formatClock(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
+function ShopCard({
+  icon,
+  title,
+  level,
+  description,
+  currentLabel,
+  cost,
+  canAfford,
+  accent,
+  onBuy,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  level: number;
+  description: string;
+  currentLabel: string;
+  cost: number;
+  canAfford: boolean;
+  accent: string;
+  onBuy: () => void;
+}) {
+  return (
+    <button
+      onClick={onBuy}
+      disabled={!canAfford}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "14px 14px",
+        borderRadius: 6,
+        border: `1px solid ${accent}44`,
+        background: COLORS.panel,
+        textAlign: "left",
+        cursor: canAfford ? "pointer" : "not-allowed",
+        opacity: canAfford ? 1 : 0.55,
+        width: "100%",
+      }}
+    >
+      <div
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: 6,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: `${accent}18`,
+          flexShrink: 0,
+        }}
+      >
+        {icon}
+      </div>
 
-function pauseMenuButtonStyle(
-  bg: string,
-  color: string,
-  border?: string
-): React.CSSProperties {
-  return {
-    width: 200,
-    padding: "12px 0",
-    borderRadius: 4,
-    border: border ? `1px solid ${border}` : "none",
-    background: bg,
-    color,
-    fontFamily: FONT_DISPLAY,
-    fontWeight: 700,
-    fontSize: 13,
-    letterSpacing: 0.6,
-    textTransform: "uppercase",
-    cursor: "pointer",
-  };
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 14,
+            color: COLORS.text,
+          }}
+        >
+          {title}
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: COLORS.textMuted,
+              fontWeight: 400,
+            }}
+          >
+            Lv {level}
+          </span>
+        </div>
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: COLORS.textMuted,
+            marginTop: 2,
+            lineHeight: 1.4,
+          }}
+        >
+          {description}
+        </div>
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9.5,
+            color: accent,
+            marginTop: 4,
+          }}
+        >
+          {currentLabel}
+        </div>
+      </div>
+
+      <div style={{ textAlign: "right", flexShrink: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 3,
+            fontFamily: FONT_MONO,
+            fontSize: 14,
+            fontWeight: 700,
+            color: canAfford ? accent : COLORS.textMuted,
+          }}
+        >
+          <ArrowUpCircle size={12} />
+          {formatPoints(cost)}
+        </div>
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+            color: COLORS.textMuted,
+            textTransform: "uppercase",
+          }}
+        >
+          cost
+        </div>
+      </div>
+    </button>
+  );
 }
 
 function MenuScreen({
   levelInfo,
-  highScores,
+  state,
+  hydrated,
   onStart,
 }: {
-  levelInfo: ReturnType<typeof levelFromTotalKills>;
-  highScores: ShooterHighScores;
-  onStart: (mode: MatchMode) => void;
+  levelInfo: LevelInfo;
+  state: TapGameState;
+  hydrated: boolean;
+  onStart: () => void;
 }) {
-  const casualStats = getCombatStats(levelInfo.level, "casual");
-  const xpPct =
-    levelInfo.xpForNextLevel > 0
-      ? levelInfo.xpIntoLevel / levelInfo.xpForNextLevel
-      : 0;
+  const xpPct = levelInfo.xpForNextLevel > 0 ? levelInfo.xpIntoLevel / levelInfo.xpForNextLevel : 0;
+  const hasProgressToday = state.scoreToday > 0;
 
   return (
     <div>
@@ -793,13 +872,7 @@ function MenuScreen({
           marginBottom: 16,
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Zap size={16} color={COLORS.chrome} />
             <span
@@ -814,13 +887,7 @@ function MenuScreen({
             </span>
           </div>
 
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              color: COLORS.textMuted,
-            }}
-          >
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: COLORS.textMuted }}>
             {levelInfo.xpIntoLevel} / {levelInfo.xpForNextLevel} XP
           </span>
         </div>
@@ -845,315 +912,102 @@ function MenuScreen({
 
         <div
           style={{
-            display: "flex",
-            gap: 14,
             marginTop: 12,
             fontFamily: FONT_MONO,
             fontSize: 9.5,
             color: COLORS.textMuted,
           }}
         >
-          <span>{casualStats.maxHp} HP</span>
-          <span>
-            {Math.round((1 - casualStats.fireRateMultiplier) * 100)}% faster fire
-          </span>
-          <span>
-            {Math.round((1 - casualStats.reloadMultiplier) * 100)}% faster reload
-          </span>
+          ×{levelInfo.tapMultiplier.toFixed(2)} tap power from level
         </div>
       </div>
 
-      {/* MODE SELECT */}
+      {/* PERSONAL BEST CARD */}
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 10.5,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 1.5,
-          marginBottom: 10,
-        }}
-      >
-        Select mode
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <ModeCard
-          icon={<Target size={18} color={COLORS.chrome} />}
-          title="Casual"
-          description="Your level bonuses apply. Build your edge through daily kills."
-          best={highScores.casual}
-          accent={COLORS.chrome}
-          onSelect={() => onStart("casual")}
-        />
-
-        <ModeCard
-          icon={<Crosshair size={18} color="#d6453d" />}
-          title="Ranked"
-          description="Stats normalized to baseline. Pure aim, pure movement."
-          best={highScores.ranked}
-          accent="#d6453d"
-          onSelect={() => onStart("ranked")}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ModeCard({
-  icon,
-  title,
-  description,
-  best,
-  accent,
-  onSelect,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  best: ShooterMatchResult | null;
-  accent: string;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      onClick={onSelect}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "14px 14px",
-        borderRadius: 6,
-        border: `1px solid ${accent}44`,
-        background: COLORS.panel,
-        textAlign: "left",
-        cursor: "pointer",
-      }}
-    >
-      <div
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 6,
           display: "flex",
           alignItems: "center",
-          justifyContent: "center",
-          background: `${accent}18`,
-          flexShrink: 0,
+          gap: 12,
+          padding: "14px 16px",
+          borderRadius: 6,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 16,
         }}
       >
-        {icon}
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 14,
-            color: COLORS.text,
+            width: 38,
+            height: 38,
+            borderRadius: 6,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: `${COLORS.chrome}18`,
+            flexShrink: 0,
           }}
         >
-          {title}
+          <Trophy size={18} color={COLORS.chrome} />
         </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 14,
+              color: COLORS.text,
+            }}
+          >
+            {state.personalBest > 0 ? formatPoints(state.personalBest) : "No record yet"}
+          </div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: COLORS.textMuted, marginTop: 2 }}>
+            {state.targetBest > 0
+              ? `Beat 50% / 75% / 100% of ${formatPoints(state.targetBest)} today`
+              : "Play today to set your first personal best"}
+          </div>
+        </div>
+      </div>
+
+      {hasProgressToday && (
         <div
           style={{
             fontFamily: FONT_MONO,
             fontSize: 10,
             color: COLORS.textMuted,
-            marginTop: 2,
-            lineHeight: 1.4,
+            textAlign: "center",
+            marginBottom: 10,
           }}
         >
-          {description}
-        </div>
-      </div>
-
-      <div style={{ textAlign: "right", flexShrink: 0 }}>
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 15,
-            fontWeight: 700,
-            color: accent,
-          }}
-        >
-          {best?.score ?? "—"}
-        </div>
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-          }}
-        >
-          best score
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function ResultsScreen({
-  result,
-  isNewHighScore,
-  bestForMode,
-  onPlayAgain,
-  onExit,
-  onBackToMenu,
-}: {
-  result: ShooterMatchResult;
-  isNewHighScore: boolean;
-  bestForMode: ShooterMatchResult | null;
-  onPlayAgain: () => void;
-  onExit: () => void;
-  onBackToMenu: () => void;
-}) {
-  return (
-    <div style={{ textAlign: "center", padding: "8px 4px" }}>
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 2,
-        }}
-      >
-        {result.survived ? "Time's up" : "You went down"}
-      </div>
-
-      {isNewHighScore && (
-        <div
-          style={{
-            fontFamily: FONT_DISPLAY,
-            fontSize: 13,
-            fontWeight: 700,
-            color: COLORS.chrome,
-            marginTop: 6,
-            textTransform: "uppercase",
-            letterSpacing: 0.8,
-          }}
-        >
-          New {result.mode} high score
+          {formatPoints(state.scoreToday)} points earned today so far
         </div>
       )}
 
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 52,
-          fontWeight: 700,
-          color: COLORS.text,
-          marginTop: 10,
-        }}
-      >
-        {result.score}
-      </div>
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 10,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 1,
-        }}
-      >
-        score
-      </div>
-
-      <div
+      <button
+        onClick={onStart}
+        disabled={!hydrated}
         style={{
           display: "flex",
+          alignItems: "center",
           justifyContent: "center",
-          gap: 22,
-          marginTop: 22,
-        }}
-      >
-        <Stat label="kills" value={result.kills} />
-        <Stat
-          label="accuracy"
-          value={`${Math.round(result.accuracy * 100)}%`}
-        />
-        <Stat
-          label="best"
-          value={bestForMode ? bestForMode.score : result.score}
-        />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          marginTop: 30,
-        }}
-      >
-        <button
-          onClick={onPlayAgain}
-          style={pauseMenuButtonStyle(COLORS.chrome, COLORS.void)}
-        >
-          Play again
-        </button>
-
-        <button
-          onClick={onBackToMenu}
-          style={pauseMenuButtonStyle(
-            "transparent",
-            COLORS.textMuted,
-            COLORS.panelLine
-          )}
-        >
-          Change mode
-        </button>
-
-        <button
-          onClick={onExit}
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10.5,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-            padding: "8px 0",
-          }}
-        >
-          Exit to base
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div>
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 20,
+          gap: 8,
+          width: "100%",
+          padding: "13px 0",
+          borderRadius: 4,
+          border: "none",
+          background: COLORS.chrome,
+          color: COLORS.void,
+          fontFamily: FONT_DISPLAY,
           fontWeight: 700,
-          color: COLORS.text,
-        }}
-      >
-        {value}
-      </div>
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 8.5,
-          color: COLORS.textMuted,
+          fontSize: 13,
+          letterSpacing: 0.6,
           textTransform: "uppercase",
-          letterSpacing: 0.8,
+          cursor: hydrated ? "pointer" : "default",
+          opacity: hydrated ? 1 : 0.6,
         }}
       >
-        {label}
-      </div>
+        <Play size={14} />
+        {hasProgressToday ? "Continue tapping" : "Start tapping"}
+      </button>
     </div>
   );
 }
-
