@@ -79,17 +79,25 @@ function rewardValue(code: string): number {
   return charRank(code[0]) * 62 * 62 + charRank(code[1]) * 62 + charRank(code[2]);
 }
 
-function rewardTier(code: string): "gold" | "silver" | "bronze" {
+function rewardTier(code: string): "diamond" | "rhodium" | "platinum" | "gold" | "silver" | "bronze" {
   const c = code[0];
-  if (c >= "A" && c <= "Z") return "gold";
+  const b = code[1];
+  const a = code[2];
+  if (c == "Z" && b == "Z" && a == "Z") return "diamond";
+  if (c == "Z" && b == "Z" && a != "Z") return "rhodium";
+  if (c == "Z" && b != "Z") return "platinum";
+  if (c >= "A" && c < "Z") return "gold";
   if (c >= "a" && c <= "z") return "silver";
   return "bronze";
 }
 
-const TIER_COLOR: Record<"gold" | "silver" | "bronze", string> = {
-  gold: COLORS.chrome,
-  silver: "#c7d0c6",
-  bronze: "#b98a52",
+const TIER_COLOR: Record<"diamond" | "rhodium" | "platinum" | "gold" | "silver" | "bronze", string> = {
+  diamond: "#b9f2ff",    // A bright, icy diamond-blue shimmer
+  rhodium: "#e2e8f0",    // A brilliant, highly-reflective silvery white
+  platinum: "#e5e4e2",   // A deep, elegant metallic platinum gray
+  gold: COLORS.chrome,   // Your existing gold color
+  silver: "#c7d0c6",     // Your existing silver color
+  bronze: "#b98a52",     // Your existing bronze color
 };
 
 function isBrowser() {
