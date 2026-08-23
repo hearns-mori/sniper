@@ -166,8 +166,8 @@ function computeTapValue(tapLevel: number, tapMultiplier: number): number {
   return Math.max(1, Math.round((1 + tapLevel * TAP_VALUE_PER_LEVEL) * tapMultiplier));
 }
 
-function computePerSecondValue(perSecondLevel: number): number {
-  return perSecondLevel * DPS_VALUE_PER_LEVEL;
+function computePerSecondValue(perSecondLevel: number, tapMultiplier: number): number {
+  return perSecondLevel * DPS_VALUE_PER_LEVEL * tapMultiplier;
 }
 
 // ============================================================================
@@ -215,8 +215,8 @@ export default function PhaserShooter({ lifetimeKills, onExit }: PhaserShooterPr
     [state.tapLevel, levelInfo.tapMultiplier]
   );
   const perSecondValue = useMemo(
-    () => computePerSecondValue(state.perSecondLevel),
-    [state.perSecondLevel]
+    () => computePerSecondValue(state.perSecondLevel, levelInfo.tapMultiplier),
+    [state.perSecondLevel, levelInfo.tapMultiplier]
   );
 
   // ==========================================================================
@@ -918,7 +918,7 @@ function MenuScreen({
             color: COLORS.textMuted,
           }}
         >
-          ×{levelInfo.tapMultiplier.toFixed(2)} tap power from level
+          ×{levelInfo.tapMultiplier.toFixed(2)} income multiplier from level
         </div>
       </div>
 
