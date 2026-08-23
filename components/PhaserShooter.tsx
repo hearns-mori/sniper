@@ -124,7 +124,7 @@ interface LevelInfo {
 }
 
 function xpForLevel(level: number): number {
-  return Math.round(60 * Math.pow(level, 1.55));
+  return 521;
 }
 
 function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
@@ -138,7 +138,7 @@ function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
     level,
     xpIntoLevel: xp,
     xpForNextLevel: xpForLevel(level),
-    tapMultiplier: Math.pow(1.12, level - 1),
+    tapMultiplier: Math.pow(level, 1.521),
   };
 }
 
@@ -147,11 +147,11 @@ function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
 // ============================================================================
 
 const TAP_BASE_COST = 10;
-const TAP_COST_GROWTH = 1.16;
+const TAP_COST_GROWTH = 1.1521;
 const TAP_VALUE_PER_LEVEL = 1;
 
-const DPS_BASE_COST = 25;
-const DPS_COST_GROWTH = 1.2;
+const DPS_BASE_COST = 10;
+const DPS_COST_GROWTH = 1.1521;
 const DPS_VALUE_PER_LEVEL = 1;
 
 function tapUpgradeCost(level: number): number {
