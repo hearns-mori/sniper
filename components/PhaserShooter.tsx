@@ -331,7 +331,7 @@ export default function PhaserShooter({ lifetimeKills, onExit }: PhaserShooterPr
   const tapUpgradeCostNow = tapUpgradeCost(state.tapLevel);
   const dpsUpgradeCostNow = dpsUpgradeCost(state.perSecondLevel);
   const nextTapValue = computeTapValue(state.tapLevel + 1, levelInfo.tapMultiplier);
-  const nextPerSecondValue = computePerSecondValue(state.perSecondLevel + 1);
+  const nextPerSecondValue = computePerSecondValue(state.perSecondLevel + 1, levelInfo.tapMultiplier);
 
   const progressPct = state.targetBest > 0 ? Math.min(1, state.scoreToday / state.targetBest) : 0;
 
