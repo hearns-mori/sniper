@@ -1,2006 +1,1103 @@
-"use client";
-
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowLeft,
-  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
   Crosshair,
   Dices,
+  Droplet,
+  Eye,
+  Flame,
   Heart,
+  HelpCircle,
+  Info,
+  Layers,
+  Lock,
+  Pause,
+  RefreshCw,
+  Repeat,
   RotateCcw,
   Shield,
+  ShieldCheck,
   Skull,
+  Sparkles,
   Swords,
   Target,
   Trophy,
+  Wind,
+  X,
   Zap,
 } from "lucide-react";
 
-import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
+/* ============================================================================
+   THEME
+   ========================================================================== */
 
-type Phase = "menu" | "battle";
+const COLORS = {
+  void: "#0a0a0f",
+  panel: "#14141c",
+  panelLine: "#26262f",
+  text: "#e9e9ee",
+  textMuted: "#8b8b98",
+  chrome: "#8fc9dd",
+  enemy: "#e0605f",
+  heal: "#7fd48a",
+  gold: "#e0b05f",
+  offense: "#e0a05f",
+  defense: "#5fb3e0",
+  utility: "#b48fe0",
+};
 
-interface PhaserShooterProps {
-  lifetimeKills: number;
-  onExit: () => void;
+const FONT_DISPLAY = "'Rajdhani', 'Arial Narrow', sans-serif";
+const FONT_MONO = "'JetBrains Mono', 'SFMono-Regular', Consolas, monospace";
+
+const GLOBAL_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+.af-fade { animation: af-fade-kf 260ms ease both; }
+@keyframes af-fade-kf { from { opacity:0; transform:translateY(5px);} to { opacity:1; transform:translateY(0);} }
+
+.af-pop { animation: af-pop-kf 220ms cubic-bezier(.34,1.56,.64,1) both; }
+@keyframes af-pop-kf { from { opacity:0; transform:scale(0.92);} to { opacity:1; transform:scale(1);} }
+
+.af-pulse { animation: af-pulse-kf 1.7s ease-in-out infinite; }
+@keyframes af-pulse-kf { 0%,100% { opacity:0.5; } 50% { opacity:1; } }
+
+.af-spin { animation: af-spin-kf 900ms linear infinite; }
+@keyframes af-spin-kf { from { transform:rotate(0deg);} to { transform:rotate(360deg);} }
+
+.af-btn { transition: transform 120ms ease, background 120ms ease, border-color 120ms ease, opacity 120ms ease; }
+.af-btn:active:not(:disabled) { transform: scale(0.96); }
+.af-btn:disabled { cursor: not-allowed; }
+.af-btn:focus-visible { outline: 2px solid ${COLORS.chrome}; outline-offset: 2px; }
+
+.af-scroll::-webkit-scrollbar { width: 5px; }
+.af-scroll::-webkit-scrollbar-track { background: transparent; }
+.af-scroll::-webkit-scrollbar-thumb { background: ${COLORS.panelLine}; border-radius: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .af-fade, .af-pop, .af-pulse, .af-spin { animation: none !important; }
+  .af-btn { transition: none !important; }
+}
+`;
+
+/* ============================================================================
+   MATH HELPERS
+   ========================================================================== */
+
+// Percentage-style stats grow toward a ceiling but mathematically never
+// reach it — there is no clamp anywhere in this file. Every point always
+// helps, by a little less each time.
+function asymptotic(points, half, ceiling = 100) {
+  const p = Math.max(0, points);
+  return ceiling * (p / (p + half));
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function pct(value) {
+  return `${value.toFixed(1)}%`;
+}
+
+function formatNumber(value) {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) < 1000) return Math.round(value).toString();
+  return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
 /* ============================================================================
-   CORE LEVEL SYSTEM
+   LEVEL SYSTEM — exponential XP curve, exponential point payouts
    ========================================================================== */
 
-/*
- * 521 productivity kills = 1 game level.
- *
- * Level is permanent.
- * Allocation is freely changeable.
- * The player gets exactly one stat point per level.
- */
-interface LevelInfo {
-  level: number;
-  xpIntoLevel: number;
-  xpForNextLevel: number;
+function xpForLevel(level) {
+  return Math.round(60 * Math.pow(1.09, level - 1));
 }
 
-function xpForLevel(_level: number): number {
-  return 521;
+function pointsForLevel(level) {
+  return Math.max(1, Math.floor(Math.pow(1.15, level)));
 }
 
-function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
+function levelFromXp(totalXp) {
   let level = 1;
-  let xp = Math.max(0, Math.floor(lifetimeKills));
-
-  while (xp >= xpForLevel(level)) {
-    xp -= xpForLevel(level);
+  let xp = Math.max(0, Math.floor(totalXp));
+  let need = xpForLevel(level);
+  while (xp >= need) {
+    xp -= need;
     level += 1;
+    need = xpForLevel(level);
   }
+  return { level, xpIntoLevel: xp, xpForNextLevel: need };
+}
 
-  return {
-    level,
-    xpIntoLevel: xp,
-    xpForNextLevel: xpForLevel(level),
-  };
+function totalPointsThroughLevel(level) {
+  let total = 0;
+  for (let l = 1; l < level; l += 1) total += pointsForLevel(l);
+  return total;
 }
 
 /* ============================================================================
    PLAYER BUILD
    ========================================================================== */
 
-type StatKey =
-  | "vitality"
-  | "power"
-  | "armor"
-  | "agility"
-  | "precision"
-  | "critical"
-  | "evasion"
-  | "lifesteal"
-  | "penetration"
-  | "fortitude"
-  | "regeneration"
-  | "block"
-  | "counter";
+const STAT_KEYS = [
+  "vitality", "armor", "fortitude", "block", "evasion",
+  "power", "precision", "critical", "penetration", "momentum",
+  "agility", "lifesteal", "regeneration", "counter", "insight",
+];
 
-interface Allocation {
-  vitality: number;
-  power: number;
-  armor: number;
-  agility: number;
-  precision: number;
-  critical: number;
-  evasion: number;
-  lifesteal: number;
-  penetration: number;
-  fortitude: number;
-  regeneration: number;
-  block: number;
-  counter: number;
-}
+const EMPTY_ALLOCATION = STAT_KEYS.reduce((acc, key) => ({ ...acc, [key]: 0 }), {});
 
-const EMPTY_ALLOCATION: Allocation = {
-  vitality: 0,
-  power: 0,
-  armor: 0,
-  agility: 0,
-  precision: 0,
-  critical: 0,
-  evasion: 0,
-  lifesteal: 0,
-  penetration: 0,
-  fortitude: 0,
-  regeneration: 0,
-  block: 0,
-  counter: 0,
-};
+function buildPlayerStats(a) {
+  const maxHp = 100 + a.vitality * 32;
+  const attack = 10 + a.power * 5 + Math.floor(Math.pow(a.power, 1.05));
+  const defense = 5 + a.armor * 4;
 
-interface Stats {
-  hp: number;
-  maxHp: number;
-  attack: number;
-  defense: number;
-  speed: number;
-  accuracy: number;
-  critChance: number;
-  critMultiplier: number;
-  dodgeChance: number;
-  lifesteal: number;
-  penetration: number;
-  damageReduction: number;
-  regeneration: number;
-  blockChance: number;
-  blockAmount: number;
-  counterChance: number;
-  counterDamage: number;
-}
+  const accuracy = 70 + asymptotic(a.precision, 20, 28);
+  const critChance = asymptotic(a.critical, 28, 100);
+  const critMultiplier = 1.5 + a.critical * 0.015;
+  const penetrationPct = asymptotic(a.penetration * 1.4 + a.precision * 0.25, 35, 95);
+  const momentumBonus = a.momentum * 0.01;
 
-/*
- * Broad stat system.
- *
- * Every allocation has a meaningful identity:
- *
- * Vitality      = enormous HP
- * Power         = attack
- * Armor         = defense
- * Agility       = speed + dodge
- * Precision     = accuracy + penetration
- * Critical      = crit
- * Evasion       = dodge
- * Lifesteal     = sustain
- * Penetration   = bypass defense / reduction
- * Fortitude     = damage reduction
- * Regeneration  = healing
- * Block         = chance to reduce hits
- * Counter       = retaliation
- *
- * Soft caps prevent one stat from becoming mathematically unbeatable.
- */
-function buildPlayerStats(allocation: Allocation): Stats {
-  const hp = 100 + allocation.vitality * 28;
+  const damageReductionPct = asymptotic(a.fortitude, 35, 90);
+  const blockPct = asymptotic(a.block * 1.2 + a.armor * 0.2, 28, 88);
+  const dodgeChance = asymptotic(a.agility * 0.7 + a.evasion * 1.3, 30, 92);
 
-  const attack =
-    12 +
-    allocation.power * 6 +
-    Math.floor(Math.pow(allocation.power, 1.08));
-
-  const defense =
-    5 +
-    allocation.armor * 4 +
-    Math.floor(Math.pow(allocation.armor, 1.04));
-
-  const speed = 10 + allocation.agility * 2.2;
-
-  const accuracy = Math.min(
-    98,
-    82 + allocation.precision * 1.2
-  );
-
-  const critChance = Math.min(
-    55,
-    5 + allocation.critical * 1.35
-  );
-
-  const critMultiplier =
-    1.5 + Math.min(1.0, allocation.critical * 0.025);
-
-  const dodgeChance = Math.min(
-    45,
-    allocation.agility * 0.65 + allocation.evasion * 1.35
-  );
-
-  const lifesteal = Math.min(
-    35,
-    allocation.lifesteal * 1.15
-  );
-
-  const penetration = Math.min(
-    70,
-    allocation.precision * 0.8 +
-      allocation.penetration * 1.4
-  );
-
-  const damageReduction = Math.min(
-    55,
-    allocation.fortitude * 1.15
-  );
-
-  const regeneration =
-    allocation.regeneration * 0.7;
-
-  const blockChance = Math.min(
-    50,
-    allocation.block * 1.25
-  );
-
-  const blockAmount = Math.min(
-    65,
-    15 + allocation.block * 0.85
-  );
-
-  const counterChance = Math.min(
-    45,
-    allocation.counter * 1.25
-  );
-
-  const counterDamage =
-    0.25 + Math.min(0.75, allocation.counter * 0.018);
+  const lifestealPct = asymptotic(a.lifesteal, 40, 70);
+  const regenAmount = 6 + a.regeneration * 1.3;
+  const counterMult = 0.3 + a.counter * 0.02;
+  const insightChance = asymptotic(a.insight, 15, 90);
 
   return {
-    hp,
-    maxHp: hp,
-    attack,
-    defense,
-    speed,
-    accuracy,
-    critChance,
-    critMultiplier,
-    dodgeChance,
-    lifesteal,
-    penetration,
-    damageReduction,
-    regeneration,
-    blockChance,
-    blockAmount,
-    counterChance,
-    counterDamage,
+    maxHp, attack, defense, accuracy, critChance, critMultiplier,
+    penetrationPct, momentumBonus, damageReductionPct, blockPct,
+    dodgeChance, lifestealPct, regenAmount, counterMult, insightChance,
   };
 }
 
 /* ============================================================================
-   ENEMY SYSTEM
+   STAT DEFINITIONS (drives the loadout grid + live readouts)
    ========================================================================== */
 
-interface Enemy {
-  id: number;
-  name: string;
-  level: number;
-  hp: number;
-  maxHp: number;
-  attack: number;
-  defense: number;
-  speed: number;
-  accuracy: number;
-  critChance: number;
-  critMultiplier: number;
-  dodgeChance: number;
-  lifesteal: number;
-  penetration: number;
-  damageReduction: number;
-  regeneration: number;
-  blockChance: number;
-  blockAmount: number;
-  counterChance: number;
-  counterDamage: number;
-  archetype: string;
-}
+const STAT_DEFINITIONS = [
+  { key: "power", group: "OFFENSE", name: "Power", short: "ATK", Icon: Swords,
+    blurb: "Raw attack damage. No ceiling.",
+    kind: "linear", getValue: (s) => s.attack, format: (v) => `${Math.round(v)} ATK` },
+  { key: "precision", group: "OFFENSE", name: "Precision", short: "ACC", Icon: Crosshair,
+    blurb: "Accuracy, plus a sliver of penetration. Approaches ~98% to-hit.",
+    kind: "asymptotic", ceiling: 98, getValue: (s) => s.accuracy, format: pct },
+  { key: "critical", group: "OFFENSE", name: "Critical", short: "CRIT", Icon: Target,
+    blurb: "Crit chance approaches 100% — crit damage keeps climbing forever.",
+    kind: "critical", getValue: (s) => s.critChance, format: pct },
+  { key: "penetration", group: "OFFENSE", name: "Penetration", short: "PEN", Icon: Zap,
+    blurb: "Ignore enemy defense, and weaken their Defend card. Approaches 95%.",
+    kind: "asymptotic", ceiling: 95, getValue: (s) => s.penetrationPct, format: pct },
+  { key: "momentum", group: "OFFENSE", name: "Momentum", short: "COMBO", Icon: Flame,
+    blurb: "Bonus damage per consecutive Attack card. No ceiling — never stop swinging.",
+    kind: "linear", getValue: (s) => s.momentumBonus * 100, format: (v) => `+${v.toFixed(1)}%/stack` },
+
+  { key: "vitality", group: "DEFENSE", name: "Vitality", short: "HP", Icon: Heart,
+    blurb: "Flat max HP. No ceiling.",
+    kind: "linear", getValue: (s) => s.maxHp, format: (v) => `${Math.round(v)} HP` },
+  { key: "armor", group: "DEFENSE", name: "Armor", short: "DEF", Icon: Shield,
+    blurb: "Raw defense. Diminishing returns are baked into the damage formula, but the stat itself never stops climbing.",
+    kind: "linear", getValue: (s) => s.defense, format: (v) => `${v.toFixed(1)} DEF` },
+  { key: "fortitude", group: "DEFENSE", name: "Fortitude", short: "DR", Icon: Layers,
+    blurb: "A final passive damage-reduction layer, applies no matter which card you play. Approaches 90%.",
+    kind: "asymptotic", ceiling: 90, getValue: (s) => s.damageReductionPct, format: pct },
+  { key: "block", group: "DEFENSE", name: "Block", short: "BLK", Icon: ShieldCheck,
+    blurb: "Powers the Defend card's guaranteed mitigation. Approaches 88%.",
+    kind: "asymptotic", ceiling: 88, getValue: (s) => s.blockPct, format: pct },
+  { key: "evasion", group: "DEFENSE", name: "Evasion", short: "EVA", Icon: Activity,
+    blurb: "Feeds the Dodge card's evade chance, together with Agility.",
+    kind: "asymptotic", ceiling: 92, getValue: (s) => s.dodgeChance, format: pct },
+
+  { key: "agility", group: "UTILITY", name: "Agility", short: "AGI", Icon: Wind,
+    blurb: "Also feeds the Dodge card's evade chance, together with Evasion.",
+    kind: "asymptotic", ceiling: 92, getValue: (s) => s.dodgeChance, format: pct },
+  { key: "lifesteal", group: "UTILITY", name: "Lifesteal", short: "LS", Icon: Droplet,
+    blurb: "Heal a share of the damage your attacks deal. Approaches 70%.",
+    kind: "asymptotic", ceiling: 70, getValue: (s) => s.lifestealPct, format: pct },
+  { key: "regeneration", group: "UTILITY", name: "Regeneration", short: "REGEN", Icon: RefreshCw,
+    blurb: "HP restored by the Do Nothing card. No ceiling.",
+    kind: "linear", getValue: (s) => s.regenAmount, format: (v) => `+${Math.round(v)} HP` },
+  { key: "counter", group: "UTILITY", name: "Counter", short: "CNTR", Icon: Repeat,
+    blurb: "Damage returned when Counter Stance lands. No ceiling — 1 point unlocks the card.",
+    kind: "linear", getValue: (s) => s.counterMult * 100, format: (v) => `${Math.round(v)}% of ATK` },
+  { key: "insight", group: "UTILITY", name: "Insight", short: "INS", Icon: Eye,
+    blurb: "Chance to glimpse the enemy's next move before you choose. Approaches 90%.",
+    kind: "asymptotic", ceiling: 90, getValue: (s) => s.insightChance, format: pct },
+];
+
+const GROUP_ORDER = ["OFFENSE", "DEFENSE", "UTILITY"];
+const GROUP_COLOR = { OFFENSE: COLORS.offense, DEFENSE: COLORS.defense, UTILITY: COLORS.utility };
+
+/* ============================================================================
+   CARDS
+   ========================================================================== */
+
+const CARD_DEFS = [
+  { key: "attack", name: "Attack", Icon: Swords,
+    blurb: "A direct strike using your Power and accuracy.",
+    unlocked: () => true, hint: "" },
+  { key: "powerAttack", name: "Power Strike", Icon: Zap,
+    blurb: "1.55x damage, -15% accuracy.",
+    unlocked: (a) => a.power >= 5, hint: "Invest 5 in Power" },
+  { key: "defend", name: "Defend", Icon: Shield,
+    blurb: "Guaranteed mitigation from Block, this turn only.",
+    unlocked: () => true, hint: "" },
+  { key: "dodge", name: "Dodge", Icon: Activity,
+    blurb: "Chance to fully evade the incoming hit. All or nothing.",
+    unlocked: () => true, hint: "" },
+  { key: "doNothing", name: "Do Nothing", Icon: Pause,
+    blurb: "Recover HP via Regeneration and reset your combo.",
+    unlocked: () => true, hint: "" },
+  { key: "counter", name: "Counter Stance", Icon: Repeat,
+    blurb: "If they attack, you retaliate for a share of your ATK.",
+    unlocked: (a) => a.counter >= 1, hint: "Invest 1 in Counter" },
+];
+
+/* ============================================================================
+   ENEMIES
+   ========================================================================== */
 
 let enemyId = 1;
 
 const ENEMY_NAMES = [
-  "Iron Revenant",
-  "Void Hunter",
-  "Glass Predator",
-  "Ash Knight",
-  "Blood Warden",
-  "Storm Stalker",
-  "Bone Titan",
-  "Night Fang",
-  "Rift Soldier",
-  "Crimson Machine",
-  "Silent Executioner",
-  "Obsidian Beast",
-  "Feral Construct",
-  "Dread Vanguard",
-  "Chaos Runner",
+  "Iron Revenant", "Void Hunter", "Glass Predator", "Ash Knight", "Blood Warden",
+  "Storm Stalker", "Bone Titan", "Night Fang", "Rift Soldier", "Crimson Machine",
+  "Silent Executioner", "Obsidian Beast", "Feral Construct", "Dread Vanguard", "Chaos Runner",
 ];
 
 const ARCHETYPES = [
-  "Tank",
-  "Berserker",
-  "Assassin",
-  "Vampire",
-  "Guardian",
-  "Marksman",
-  "Juggernaut",
-  "Balanced",
+  { name: "Tank", hp: 1.7, atk: 0.8, def: 1.55,
+    extra: { blockPct: 22, damageReductionPct: 12 },
+    weights: { attack: 30, defend: 45, dodge: 5, doNothing: 20 } },
+  { name: "Berserker", hp: 0.85, atk: 1.6, def: 0.7,
+    extra: { critChance: 14, critMultiplier: 1.8 },
+    weights: { attack: 45, powerAttack: 30, defend: 10, doNothing: 15 } },
+  { name: "Assassin", hp: 0.7, atk: 1.3, def: 0.8,
+    extra: { critChance: 18, dodgeChance: 22 },
+    weights: { attack: 30, powerAttack: 15, dodge: 45, doNothing: 10 } },
+  { name: "Vampire", hp: 0.95, atk: 1.05, def: 0.9,
+    extra: { lifestealPct: 22, regenAmount: 5 },
+    weights: { attack: 55, defend: 15, doNothing: 30 } },
+  { name: "Guardian", hp: 1.3, atk: 0.9, def: 1.25,
+    extra: { blockPct: 24 },
+    weights: { attack: 25, defend: 50, doNothing: 25 } },
+  { name: "Marksman", hp: 0.8, atk: 1.25, def: 0.85,
+    extra: { accuracy: 92, critChance: 10 },
+    weights: { attack: 45, powerAttack: 35, dodge: 20 } },
+  { name: "Juggernaut", hp: 2.0, atk: 1.1, def: 1.15,
+    extra: { damageReductionPct: 16 },
+    weights: { attack: 45, defend: 40, powerAttack: 15 } },
+  { name: "Balanced", hp: 1.0, atk: 1.0, def: 1.0,
+    extra: {},
+    weights: { attack: 35, defend: 20, dodge: 15, doNothing: 15, powerAttack: 15 } },
 ];
 
-function seededRandom(seed: number): () => number {
-  let s = Math.abs(Math.floor(seed)) || 1;
+function generateEnemy(depth, playerLevel) {
+  const archetype = ARCHETYPES[Math.floor(Math.random() * ARCHETYPES.length)];
+  const name = ENEMY_NAMES[Math.floor(Math.random() * ENEMY_NAMES.length)];
 
-  return () => {
-    s = (s * 1664525 + 1013904223) % 4294967296;
-    return s / 4294967296;
+  const difficulty = 1 + depth * 0.11 + Math.pow(depth, 1.15) * 0.02;
+  const variance = 0.85 + Math.random() * 0.3;
+
+  const hp = Math.round(90 * difficulty * variance * archetype.hp);
+  const attack = Math.round(11 * difficulty * variance * archetype.atk * 10) / 10;
+  const defense = Math.round(5 * difficulty * variance * archetype.def * 10) / 10;
+
+  const base = {
+    accuracy: 82, critChance: 6, critMultiplier: 1.6, dodgeChance: 4,
+    blockPct: 10, damageReductionPct: 0, lifestealPct: 0, regenAmount: 0,
   };
-}
-
-function generateEnemy(depth: number, playerLevel: number): Enemy {
-  /*
-   * A deterministic seed based on depth + current time.
-   *
-   * This means every new enemy is different while the combat itself
-   * remains reproducible during one fight.
-   */
-  const seed =
-    Date.now() +
-    depth * 7919 +
-    playerLevel * 104729 +
-    Math.floor(Math.random() * 999999);
-
-  const random = seededRandom(seed);
-
-  const archetype =
-    ARCHETYPES[Math.floor(random() * ARCHETYPES.length)];
-
-  const name =
-    ENEMY_NAMES[Math.floor(random() * ENEMY_NAMES.length)];
-
-  /*
-   * Enemy power rises with depth, but not linearly.
-   *
-   * This creates increasing danger without requiring absurd numbers.
-   */
-  const difficulty =
-    1 +
-    depth * 0.095 +
-    Math.pow(depth, 1.18) * 0.018;
-
-  const variance = 0.82 + random() * 0.36;
-
-  let hp = 120 * difficulty * variance;
-  let attack = 13 * difficulty * variance;
-  let defense = 6 * difficulty * variance;
-  let speed = 10 * (0.9 + random() * 0.25);
-  let accuracy = 82;
-  let critChance = 5;
-  let critMultiplier = 1.5;
-  let dodgeChance = 3;
-  let lifesteal = 0;
-  let penetration = 0;
-  let damageReduction = 0;
-  let regeneration = 0;
-  let blockChance = 0;
-  let blockAmount = 20;
-  let counterChance = 0;
-  let counterDamage = 0.35;
-
-  switch (archetype) {
-    case "Tank":
-      hp *= 1.7;
-      defense *= 1.55;
-      attack *= 0.78;
-      speed *= 0.75;
-      damageReduction = 12 + random() * 12;
-      blockChance = 12 + random() * 10;
-      blockAmount = 35;
-      break;
-
-    case "Berserker":
-      hp *= 0.85;
-      attack *= 1.65;
-      defense *= 0.7;
-      critChance = 15 + random() * 12;
-      critMultiplier = 1.8;
-      damageReduction = 3;
-      break;
-
-    case "Assassin":
-      hp *= 0.7;
-      attack *= 1.35;
-      speed *= 1.8;
-      critChance = 20 + random() * 15;
-      critMultiplier = 1.9;
-      dodgeChance = 18 + random() * 10;
-      accuracy = 88;
-      break;
-
-    case "Vampire":
-      hp *= 0.95;
-      attack *= 1.05;
-      lifesteal = 18 + random() * 15;
-      regeneration = 0.5 + random() * 1.2;
-      break;
-
-    case "Guardian":
-      hp *= 1.35;
-      defense *= 1.25;
-      attack *= 0.9;
-      blockChance = 25 + random() * 12;
-      blockAmount = 45;
-      counterChance = 12;
-      break;
-
-    case "Marksman":
-      hp *= 0.8;
-      attack *= 1.25;
-      accuracy = 94;
-      penetration = 15 + random() * 15;
-      critChance = 12 + random() * 8;
-      break;
-
-    case "Juggernaut":
-      hp *= 2;
-      defense *= 1.2;
-      attack *= 1.15;
-      speed *= 0.65;
-      damageReduction = 20 + random() * 10;
-      break;
-
-    case "Balanced":
-    default:
-      hp *= 1.05;
-      attack *= 1.05;
-      defense *= 1.05;
-      break;
-  }
+  const merged = { ...base, ...archetype.extra };
 
   return {
     id: enemyId++,
     name,
-    level: Math.max(1, playerLevel + Math.floor(depth * 0.4)),
-    hp: Math.round(hp),
-    maxHp: Math.round(hp),
-    attack: Math.round(attack * 10) / 10,
-    defense: Math.round(defense * 10) / 10,
-    speed: Math.round(speed * 10) / 10,
-    accuracy,
-    critChance,
-    critMultiplier,
-    dodgeChance,
-    lifesteal,
-    penetration,
-    damageReduction,
-    regeneration,
-    blockChance,
-    blockAmount,
-    counterChance,
-    counterDamage,
-    archetype,
+    archetypeName: archetype.name,
+    level: Math.max(1, playerLevel + Math.floor(depth * 0.35)),
+    hp, maxHp: hp,
+    attack, defense,
+    accuracy: merged.accuracy,
+    critChance: merged.critChance,
+    critMultiplier: merged.critMultiplier,
+    dodgeChance: merged.dodgeChance,
+    blockPct: merged.blockPct,
+    damageReductionPct: merged.damageReductionPct,
+    lifestealPct: merged.lifestealPct,
+    regenAmount: merged.regenAmount,
+    weights: archetype.weights,
   };
 }
+
+function pickEnemyAction(enemy) {
+  const entries = Object.entries(enemy.weights);
+  const total = entries.reduce((sum, [, w]) => sum + w, 0);
+  let roll = Math.random() * total;
+  for (const [key, w] of entries) {
+    if (roll < w) return key;
+    roll -= w;
+  }
+  return entries[0][0];
+}
+
+const CARD_LABELS = {
+  attack: "Attack", powerAttack: "Power Strike", defend: "Defend",
+  dodge: "Dodge", doNothing: "Do Nothing", counter: "Counter Stance",
+};
 
 /* ============================================================================
-   COMBAT
+   COMBAT RESOLUTION — one round, one player card, one enemy card
    ========================================================================== */
 
-interface CombatLog {
-  id: number;
-  text: string;
-  type: "player" | "enemy" | "system" | "critical" | "heal";
-}
+function resolveExchange({ playerCard, enemyCard, playerStats, enemy, momentum }) {
+  const log = [];
+  let playerDamage = 0;
+  let enemyDamage = 0;
+  let playerHeal = 0;
+  let enemyHeal = 0;
+  let momentumAfter = momentum;
 
-interface CombatResult {
-  won: boolean;
-  playerHp: number;
-  enemyHp: number;
-  log: CombatLog[];
-  rounds: number;
-}
+  const playerAttacking = playerCard === "attack" || playerCard === "powerAttack";
+  const enemyAttacking = enemyCard === "attack" || enemyCard === "powerAttack";
 
-function calculateDamage(
-  attacker: Stats,
-  defender: Stats,
-  defenderHp: number,
-  random: () => number
-): {
-  damage: number;
-  critical: boolean;
-  dodged: boolean;
-  blocked: boolean;
-  healed: number;
-} {
-  /*
-   * Dodge first.
-   */
-  if (random() * 100 > attacker.accuracy) {
-    return {
-      damage: 0,
-      critical: false,
-      dodged: true,
-      blocked: false,
-      healed: 0,
-    };
-  }
+  // --- Player's offense ---
+  if (playerAttacking) {
+    const power = playerCard === "powerAttack";
+    const acc = playerStats.accuracy - (power ? 15 : 0);
 
-  if (random() * 100 < defender.dodgeChance) {
-    return {
-      damage: 0,
-      critical: false,
-      dodged: true,
-      blocked: false,
-      healed: 0,
-    };
-  }
+    if (Math.random() * 100 < acc) {
+      let effDef = enemy.defense * (1 - playerStats.penetrationPct / 100);
+      if (enemyCard === "defend") effDef += enemy.defense * (enemy.blockPct / 100) * 1.5;
 
-  /*
-   * Defense is reduced by penetration.
-   *
-   * This makes penetration useful without making defense irrelevant.
-   */
-  const effectiveDefense =
-    defender.defense *
-    (1 - Math.min(0.85, attacker.penetration / 100));
+      let dmg = playerStats.attack * (power ? 1.55 : 1) * (100 / (100 + Math.max(0, effDef)));
 
-  /*
-   * Defense follows diminishing returns.
-   */
-  const defenseMultiplier =
-    100 / (100 + Math.max(0, effectiveDefense));
+      if (momentum > 0) dmg *= 1 + Math.min(2.5, momentum * playerStats.momentumBonus);
 
-  let damage = attacker.attack * defenseMultiplier;
+      const crit = Math.random() * 100 < playerStats.critChance;
+      if (crit) dmg *= playerStats.critMultiplier;
 
-  const critical =
-    random() * 100 < attacker.critChance;
+      const evaded = enemyCard === "dodge" && Math.random() * 100 < Math.min(96, enemy.dodgeChance * 1.6);
 
-  if (critical) {
-    damage *= attacker.critMultiplier;
-  }
-
-  /*
-   * Final damage reduction happens after armor.
-   */
-  damage *=
-    1 - Math.min(0.8, defender.damageReduction / 100);
-
-  /*
-   * Block is multiplicative rather than absolute.
-   */
-  const blocked =
-    random() * 100 < defender.blockChance;
-
-  if (blocked) {
-    damage *=
-      1 - Math.min(0.8, defender.blockAmount / 100);
-  }
-
-  damage = Math.max(1, damage);
-
-  const healed =
-    damage * (attacker.lifesteal / 100);
-
-  return {
-    damage,
-    critical,
-    dodged: false,
-    blocked,
-    healed: Math.min(healed, attacker.maxHp - defenderHp),
-  };
-}
-
-function fight(
-  player: Stats,
-  enemy: Enemy,
-  seed: number
-): CombatResult {
-  const random = seededRandom(seed);
-
-  let playerHp = player.maxHp;
-  let enemyHp = enemy.maxHp;
-
-  const log: CombatLog[] = [];
-  let logId = 1;
-  let rounds = 0;
-
-  /*
-   * Hard safety cap.
-   *
-   * A properly balanced battle should end long before this.
-   */
-  while (
-    playerHp > 0 &&
-    enemyHp > 0 &&
-    rounds < 250
-  ) {
-    rounds += 1;
-
-    const playerFirst =
-      player.speed >= enemy.speed
-        ? random() > 0.15
-        : random() < 0.15;
-
-    const turns = playerFirst
-      ? ["player", "enemy"]
-      : ["enemy", "player"];
-
-    for (const turn of turns) {
-      if (playerHp <= 0 || enemyHp <= 0) break;
-
-      if (turn === "player") {
-        const result = calculateDamage(
-          player,
-          enemy,
-          enemyHp,
-          random
-        );
-
-        if (result.dodged) {
-          log.push({
-            id: logId++,
-            text: "Your attack missed.",
-            type: "system",
-          });
-        } else {
-          enemyHp = Math.max(
-            0,
-            enemyHp - result.damage
-          );
-
-          playerHp = Math.min(
-            player.maxHp,
-            playerHp + result.healed
-          );
-
-          log.push({
-            id: logId++,
-            text: result.critical
-              ? `CRITICAL hit for ${Math.round(result.damage)}`
-              : `You dealt ${Math.round(result.damage)} damage`,
-            type: result.critical
-              ? "critical"
-              : "player",
-          });
-
-          if (result.healed > 0) {
-            log.push({
-              id: logId++,
-              text: `Lifesteal +${Math.round(result.healed)} HP`,
-              type: "heal",
-            });
-          }
-
-          if (result.blocked) {
-            log.push({
-              id: logId++,
-              text: "Enemy blocked part of the hit.",
-              type: "system",
-            });
-          }
-        }
+      if (evaded) {
+        log.push({ text: `${enemy.name} slips away from your strike.`, type: "system" });
       } else {
-        const enemyStats: Stats = {
-          hp: enemy.hp,
-          maxHp: enemy.maxHp,
-          attack: enemy.attack,
-          defense: enemy.defense,
-          speed: enemy.speed,
-          accuracy: enemy.accuracy,
-          critChance: enemy.critChance,
-          critMultiplier: enemy.critMultiplier,
-          dodgeChance: enemy.dodgeChance,
-          lifesteal: enemy.lifesteal,
-          penetration: enemy.penetration,
-          damageReduction: enemy.damageReduction,
-          regeneration: enemy.regeneration,
-          blockChance: enemy.blockChance,
-          blockAmount: enemy.blockAmount,
-          counterChance: enemy.counterChance,
-          counterDamage: enemy.counterDamage,
-        };
+        dmg = Math.max(1, dmg);
+        enemyDamage = dmg;
+        playerHeal += dmg * (playerStats.lifestealPct / 100);
+        log.push({
+          text: crit ? `CRITICAL — ${Math.round(dmg)} damage dealt` : `You deal ${Math.round(dmg)} damage`,
+          type: crit ? "critical" : "player",
+        });
+      }
+    } else {
+      log.push({ text: "Your attack missed.", type: "system" });
+    }
+    momentumAfter = momentum + 1;
+  } else if (playerCard === "doNothing") {
+    playerHeal += playerStats.regenAmount;
+    log.push({ text: `You steady yourself (+${Math.round(playerStats.regenAmount)} HP)`, type: "heal" });
+    momentumAfter = 0;
+  } else {
+    momentumAfter = 0;
+  }
 
-        const result = calculateDamage(
-          enemyStats,
-          player,
-          playerHp,
-          random
-        );
+  // --- Enemy's offense ---
+  if (enemyAttacking) {
+    const power = enemyCard === "powerAttack";
+    const acc = enemy.accuracy - (power ? 15 : 0);
 
-        if (result.dodged) {
-          log.push({
-            id: logId++,
-            text: "You dodged the enemy attack.",
-            type: "player",
-          });
-        } else {
-          playerHp = Math.max(
-            0,
-            playerHp - result.damage
-          );
+    if (Math.random() * 100 < acc) {
+      const evaded = playerCard === "dodge" && Math.random() * 100 < playerStats.dodgeChance;
 
-          log.push({
-            id: logId++,
-            text: result.critical
-              ? `Enemy CRIT for ${Math.round(result.damage)}`
-              : `Enemy dealt ${Math.round(result.damage)} damage`,
-            type: result.critical
-              ? "critical"
-              : "enemy",
-          });
+      if (evaded) {
+        log.push({ text: "You dodge the attack completely.", type: "player" });
+      } else {
+        let dmg = enemy.attack * (power ? 1.55 : 1);
+        if (playerCard === "defend") dmg *= 1 - playerStats.blockPct / 100;
+        dmg *= 100 / (100 + playerStats.defense);
 
-          if (result.blocked) {
-            log.push({
-              id: logId++,
-              text: "You blocked part of the attack.",
-              type: "system",
-            });
-          }
+        const crit = Math.random() * 100 < enemy.critChance;
+        if (crit) dmg *= enemy.critMultiplier;
 
-          /*
-           * Counterattack.
-           */
-          if (
-            playerHp > 0 &&
-            random() * 100 < player.counterChance
-          ) {
-            const counter =
-              enemy.defense *
-                0 +
-              player.attack *
-                player.counterDamage *
-                (1 -
-                  Math.min(
-                    0.7,
-                    enemy.defense /
-                      (enemy.defense + 150)
-                  ));
+        dmg *= 1 - playerStats.damageReductionPct / 100;
+        dmg = Math.max(1, Math.round(dmg));
+        playerDamage = dmg;
 
-            const counterDamage =
-              Math.max(1, counter);
+        log.push({
+          text: crit ? `${enemy.name} CRITs for ${dmg}` : `${enemy.name} deals ${dmg} damage`,
+          type: crit ? "critical" : "enemy",
+        });
 
-            enemyHp = Math.max(
-              0,
-              enemyHp - counterDamage
-            );
-
-            log.push({
-              id: logId++,
-              text: `Counterattack for ${Math.round(counterDamage)}`,
-              type: "critical",
-            });
-          }
+        if (playerCard === "counter") {
+          const counterDmg = Math.max(1, Math.round(playerStats.attack * playerStats.counterMult));
+          enemyDamage += counterDmg;
+          log.push({ text: `You counter for ${counterDmg}!`, type: "critical" });
         }
       }
-
-      if (playerHp <= 0 || enemyHp <= 0) {
-        break;
-      }
+    } else {
+      log.push({ text: `${enemy.name}'s attack misses.`, type: "system" });
     }
-
-    /*
-     * Regeneration occurs after each round.
-     */
-    if (playerHp > 0) {
-      playerHp = Math.min(
-        player.maxHp,
-        playerHp + player.regeneration
-      );
-    }
-
-    if (enemyHp > 0) {
-      enemyHp = Math.min(
-        enemy.maxHp,
-        enemyHp + enemy.regeneration
-      );
-    }
+  } else if (enemyCard === "doNothing") {
+    enemyHeal = enemy.regenAmount || 0;
+    log.push({ text: `${enemy.name} recovers${enemyHeal ? ` (+${Math.round(enemyHeal)} HP)` : ""}.`, type: "system" });
+  } else if (enemyCard === "defend") {
+    log.push({ text: `${enemy.name} braces defensively.`, type: "system" });
+  } else if (enemyCard === "dodge") {
+    log.push({ text: `${enemy.name} readies to evade.`, type: "system" });
   }
 
-  /*
-   * If a battle somehow reaches the cap, higher remaining HP wins.
-   */
-  if (
-    rounds >= 250 &&
-    playerHp > 0 &&
-    enemyHp > 0
-  ) {
-    return {
-      won: playerHp >= enemyHp,
-      playerHp,
-      enemyHp,
-      log,
-      rounds,
-    };
-  }
-
-  return {
-    won: enemyHp <= 0,
-    playerHp,
-    enemyHp,
-    log,
-    rounds,
-  };
+  return { log, playerDamage, enemyDamage, playerHeal, enemyHeal, momentumAfter };
 }
 
 /* ============================================================================
-   PERSISTENCE
+   PERSISTENCE — Claude artifact storage (never localStorage/sessionStorage)
    ========================================================================== */
 
-interface GameState {
-  allocation: Allocation;
-  checkpoint: number;
-  highestDepth: number;
-  totalWins: number;
-}
+const STORAGE_KEY = "ascent-game-state-v1";
+const CHECKPOINT_INTERVAL = 3;
 
-const NEW_STORAGE_KEY = "phaser_battle_v2";
-const OLD_STORAGE_KEY = "tapgame_state_v1";
-
-function defaultGameState(): GameState {
+function defaultGameState() {
   return {
     allocation: { ...EMPTY_ALLOCATION },
     checkpoint: 0,
+    runDepth: 0,
     highestDepth: 0,
     totalWins: 0,
+    totalXp: 0,
+    tutorialSeen: false,
   };
 }
 
-function loadGameState(): GameState {
-  if (typeof window === "undefined") {
-    return defaultGameState();
-  }
-
-  try {
-    const raw =
-      window.localStorage.getItem(
-        NEW_STORAGE_KEY
-      );
-
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<GameState>;
-
-      return {
-        ...defaultGameState(),
-        ...parsed,
-        allocation: {
-          ...EMPTY_ALLOCATION,
-          ...(parsed.allocation ?? {}),
-        },
-      };
-    }
-
-    /*
-     * We deliberately inspect the old state only so this replacement
-     * does not crash an existing installation.
-     */
-    const oldRaw =
-      window.localStorage.getItem(
-        OLD_STORAGE_KEY
-      );
-
-    if (oldRaw) {
-      return defaultGameState();
-    }
-
-    return defaultGameState();
-  } catch {
-    return defaultGameState();
-  }
-}
-
-function saveGameState(state: GameState) {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.localStorage.setItem(
-      NEW_STORAGE_KEY,
-      JSON.stringify(state)
-    );
-  } catch {
-    // Ignore storage errors.
-  }
-}
-
 /* ============================================================================
-   STAT DEFINITIONS
+   TUTORIAL CONTENT
    ========================================================================== */
 
-interface StatDefinition {
-  key: StatKey;
-  name: string;
-  short: string;
-  description: string;
-  icon: React.ReactNode;
-}
-
-const STAT_DEFINITIONS: StatDefinition[] = [
+const TUTORIAL_STEPS = [
   {
-    key: "vitality",
-    name: "Vitality",
-    short: "HP",
-    description: "+28 maximum HP",
-    icon: <Heart size={15} />,
+    title: "Welcome to Ascent",
+    body: "Win fights to earn XP and level up. Every level hands you more allocation points than the last — the curve is exponential, so late levels hit hard.",
+    Icon: Sparkles,
   },
   {
-    key: "power",
-    name: "Power",
-    short: "ATK",
-    description: "+attack damage",
-    icon: <Swords size={15} />,
+    title: "Stats have no ceiling",
+    body: "There's no cap anywhere in this build. Raw stats like Power and Vitality grow forever. Percentage stats like Dodge or Crit chase a ceiling but never quite touch it — every point still helps, always a little less than the last. Go ahead, dump everything into one stat and see what happens.",
+    Icon: Layers,
   },
   {
-    key: "armor",
-    name: "Armor",
-    short: "DEF",
-    description: "+defense",
-    icon: <Shield size={15} />,
+    title: "Combat is a card each round",
+    body: "Every round you pick one card: Attack, Power Strike, Defend, Dodge, Do Nothing, or Counter Stance. The enemy picks too — you resolve both at once. Two cards unlock only once you've invested in the matching stat.",
+    Icon: Swords,
   },
   {
-    key: "agility",
-    name: "Agility",
-    short: "SPD",
-    description: "+speed and dodge",
-    icon: <Zap size={15} />,
+    title: "Insight reveals intent",
+    body: "Invest in Insight and you'll sometimes see the enemy's next move before you choose your own card — turning a guess into a read.",
+    Icon: Eye,
   },
   {
-    key: "precision",
-    name: "Precision",
-    short: "ACC",
-    description: "+accuracy and penetration",
-    icon: <Crosshair size={15} />,
-  },
-  {
-    key: "critical",
-    name: "Critical",
-    short: "CRIT",
-    description: "+crit chance and crit power",
-    icon: <Target size={15} />,
-  },
-  {
-    key: "evasion",
-    name: "Evasion",
-    short: "DODGE",
-    description: "+dodge chance",
-    icon: <Activity size={15} />,
-  },
-  {
-    key: "lifesteal",
-    name: "Lifesteal",
-    short: "LS",
-    description: "+% damage returned as HP",
-    icon: <Heart size={15} />,
-  },
-  {
-    key: "penetration",
-    name: "Penetration",
-    short: "PEN",
-    description: "Ignore enemy defense",
-    icon: <Crosshair size={15} />,
-  },
-  {
-    key: "fortitude",
-    name: "Fortitude",
-    short: "DR",
-    description: "+final damage reduction",
-    icon: <Shield size={15} />,
-  },
-  {
-    key: "regeneration",
-    name: "Regeneration",
-    short: "REGEN",
-    description: "Recover HP every round",
-    icon: <Activity size={15} />,
-  },
-  {
-    key: "block",
-    name: "Block",
-    short: "BLOCK",
-    description: "Chance to reduce incoming damage",
-    icon: <Shield size={15} />,
-  },
-  {
-    key: "counter",
-    name: "Counter",
-    short: "COUNTER",
-    description: "Chance to retaliate",
-    icon: <Swords size={15} />,
+    title: "Checkpoints save your run",
+    body: `Every ${CHECKPOINT_INTERVAL} wins locks in a checkpoint. Lose a fight and you're sent back to your last checkpoint depth — never to zero.`,
+    Icon: Trophy,
   },
 ];
 
 /* ============================================================================
-   FORMATTING
+   ROOT COMPONENT
    ========================================================================== */
 
-function formatNumber(value: number): string {
-  if (!Number.isFinite(value)) return "0";
+export default function App() {
+  const [phase, setPhase] = useState("menu");
+  const [gameState, setGameState] = useState(defaultGameState);
+  const [hydrated, setHydrated] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
+  const [battle, setBattle] = useState(null);
 
-  if (Math.abs(value) < 1000) {
-    return Math.round(value).toString();
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
-}
-
-function pct(value: number): string {
-  return `${value.toFixed(1)}%`;
-}
-
-/* ============================================================================
-   MAIN COMPONENT
-   ========================================================================== */
-
-export default function PhaserShooter({
-  lifetimeKills,
-  onExit,
-}: PhaserShooterProps) {
-  const levelInfo = useMemo(
-    () =>
-      levelFromLifetimeKills(
-        lifetimeKills
-      ),
-    [lifetimeKills]
-  );
-
-  const [phase, setPhase] =
-    useState<Phase>("menu");
-
-  const [gameState, setGameState] =
-    useState<GameState>(() =>
-      defaultGameState()
-    );
-
-  const [hydrated, setHydrated] =
-    useState(false);
-
-  const [enemy, setEnemy] =
-    useState<Enemy | null>(null);
-
-  const [combat, setCombat] =
-    useState<CombatResult | null>(null);
-
-  const [fighting, setFighting] =
-    useState(false);
-
-  const [toast, setToast] =
-    useState<string | null>(null);
-
-  const [showStats, setShowStats] =
-    useState(false);
-
-  const stats = useMemo(
-    () =>
-      buildPlayerStats(
-        gameState.allocation
-      ),
-    [gameState.allocation]
-  );
-
+  const stats = useMemo(() => buildPlayerStats(gameState.allocation), [gameState.allocation]);
+  const levelInfo = useMemo(() => levelFromXp(gameState.totalXp), [gameState.totalXp]);
+  const totalPoints = useMemo(() => totalPointsThroughLevel(levelInfo.level), [levelInfo.level]);
   const allocatedPoints = useMemo(
-    () =>
-      Object.values(
-        gameState.allocation
-      ).reduce(
-        (sum, value) => sum + value,
-        0
-      ),
+    () => Object.values(gameState.allocation).reduce((sum, v) => sum + v, 0),
     [gameState.allocation]
   );
+  const availablePoints = Math.max(0, totalPoints - allocatedPoints);
 
-  const availablePoints =
-    Math.max(
-      0,
-      levelInfo.level -
-        1 -
-        allocatedPoints
-    );
-
-  /* --------------------------------------------------------------------------
-     LOAD
-     ------------------------------------------------------------------------ */
-
+  /* ---------------- LOAD ---------------- */
   useEffect(() => {
-    setGameState(loadGameState());
-    setHydrated(true);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (!cancelled && res && res.value) {
+          const parsed = JSON.parse(res.value);
+          setGameState({
+            ...defaultGameState(),
+            ...parsed,
+            allocation: { ...EMPTY_ALLOCATION, ...(parsed.allocation || {}) },
+          });
+          if (!parsed.tutorialSeen) setTutorialOpen(true);
+        } else if (!cancelled) {
+          setTutorialOpen(true);
+        }
+      } catch {
+        if (!cancelled) setTutorialOpen(true);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
+  /* ---------------- SAVE ---------------- */
   useEffect(() => {
     if (!hydrated) return;
-    saveGameState(gameState);
+    (async () => {
+      try {
+        await window.storage.set(STORAGE_KEY, JSON.stringify(gameState), false);
+      } catch {
+        // best-effort persistence
+      }
+    })();
   }, [gameState, hydrated]);
 
-  /* --------------------------------------------------------------------------
-     TOAST
-     ------------------------------------------------------------------------ */
-
+  /* ---------------- TOAST ---------------- */
   useEffect(() => {
     if (!toast) return;
-
-    const timeout =
-      window.setTimeout(
-        () => setToast(null),
-        2200
-      );
-
-    return () =>
-      window.clearTimeout(timeout);
+    const t = window.setTimeout(() => setToast(null), 2600);
+    return () => window.clearTimeout(t);
   }, [toast]);
 
-  /* --------------------------------------------------------------------------
-     ALLOCATION
-     ------------------------------------------------------------------------ */
-
-  const allocate = useCallback(
-    (key: StatKey) => {
-      if (availablePoints <= 0) {
-        setToast(
-          "No level points available."
-        );
-        return;
-      }
-
-      setGameState((previous) => ({
-        ...previous,
-        allocation: {
-          ...previous.allocation,
-          [key]:
-            previous.allocation[key] + 1,
-        },
-      }));
-    },
-    [availablePoints]
-  );
-
-  const resetBuild = useCallback(() => {
-    setGameState((previous) => ({
-      ...previous,
-      allocation: {
-        ...EMPTY_ALLOCATION,
-      },
-    }));
-
-    setToast(
-      "Build reset. Redistribute your levels."
-    );
+  /* ---------------- ALLOCATION ---------------- */
+  const allocate = useCallback((key, amount) => {
+    setGameState((prev) => {
+      const currentAllocated = Object.values(prev.allocation).reduce((s, v) => s + v, 0);
+      const currentAvailable = Math.max(0, totalPointsThroughLevel(levelFromXp(prev.totalXp).level) - currentAllocated);
+      const grant = Math.min(amount, currentAvailable);
+      if (grant <= 0) return prev;
+      return { ...prev, allocation: { ...prev.allocation, [key]: prev.allocation[key] + grant } };
+    });
   }, []);
 
-  /* --------------------------------------------------------------------------
-     START BATTLE
-     ------------------------------------------------------------------------ */
+  const resetBuild = useCallback(() => {
+    setGameState((prev) => ({ ...prev, allocation: { ...EMPTY_ALLOCATION } }));
+    setToast("Build reset. Redistribute your points.");
+  }, []);
 
-  const startBattle = useCallback(
-    (depth: number) => {
-      const nextEnemy =
-        generateEnemy(
-          depth,
-          levelInfo.level
-        );
+  /* ---------------- TUTORIAL ---------------- */
+  const closeTutorial = useCallback(() => {
+    setTutorialOpen(false);
+    setTutorialStep(0);
+    setGameState((prev) => (prev.tutorialSeen ? prev : { ...prev, tutorialSeen: true }));
+  }, []);
 
-      setEnemy(nextEnemy);
-      setCombat(null);
-      setPhase("battle");
-    },
-    [levelInfo.level]
-  );
+  const openTutorial = useCallback(() => {
+    setTutorialStep(0);
+    setTutorialOpen(true);
+  }, []);
 
-  const startFromCheckpoint =
-    useCallback(() => {
-      startBattle(
-        gameState.checkpoint + 1
-      );
-    }, [
-      gameState.checkpoint,
-      startBattle,
-    ]);
+  /* ---------------- BATTLE ---------------- */
+  const startBattle = useCallback(() => {
+    const depth = gameState.runDepth + 1;
+    const enemy = generateEnemy(depth, levelInfo.level);
+    const intent = pickEnemyAction(enemy);
+    const revealed = Math.random() * 100 < stats.insightChance;
 
-  /* --------------------------------------------------------------------------
-     FIGHT
-     ------------------------------------------------------------------------ */
-
-  const fightEnemy = useCallback(() => {
-    if (!enemy || fighting) return;
-
-    setFighting(true);
-
-    /*
-     * Tiny delay makes the fight feel like an event rather than an
-     * instantaneous calculation.
-     */
-    window.setTimeout(() => {
-      const result = fight(
-        stats,
-        enemy,
-        Date.now() +
-          enemy.id * 997
-      );
-
-      setCombat(result);
-      setFighting(false);
-
-      if (result.won) {
-        const newDepth =
-          gameState.checkpoint +
-          1;
-
-        const newCheckpoint =
-          newDepth % 5 === 0
-            ? newDepth
-            : gameState.checkpoint;
-
-        setGameState(
-          (previous) => ({
-            ...previous,
-            checkpoint:
-              Math.max(
-                previous.checkpoint,
-                newCheckpoint
-              ),
-            highestDepth:
-              Math.max(
-                previous.highestDepth,
-                newDepth
-              ),
-            totalWins:
-              previous.totalWins + 1,
-          })
-        );
-
-        if (
-          newCheckpoint >
-          gameState.checkpoint
-        ) {
-          setToast(
-            `CHECKPOINT ${newCheckpoint} REACHED`
-          );
-        } else {
-          setToast(
-            "Enemy defeated. What's next?"
-          );
-        }
-      } else {
-        setToast(
-          `Defeated. Checkpoint ${gameState.checkpoint} restored.`
-        );
-      }
-    }, 350);
-  }, [
-    enemy,
-    fighting,
-    stats,
-    gameState.checkpoint,
-  ]);
-
-  const nextEnemy = useCallback(() => {
-    startBattle(
-      gameState.checkpoint + 1
-    );
-  }, [
-    gameState.checkpoint,
-    startBattle,
-  ]);
+    setBattle({
+      enemy,
+      depth,
+      playerHp: stats.maxHp,
+      enemyHp: enemy.maxHp,
+      momentum: 0,
+      round: 1,
+      log: [],
+      phase: "awaiting",
+      enemyIntent: intent,
+      intentRevealed: revealed,
+      outcome: null,
+      xpGained: 0,
+    });
+    setPhase("battle");
+  }, [gameState.runDepth, levelInfo.level, stats]);
 
   const backToMenu = useCallback(() => {
     setPhase("menu");
-    setEnemy(null);
-    setCombat(null);
+    setBattle(null);
   }, []);
 
-  /* --------------------------------------------------------------------------
-     RENDER
-     ------------------------------------------------------------------------ */
+  const playCard = useCallback((cardKey) => {
+    setBattle((prev) => {
+      if (!prev || prev.phase === "ended") return prev;
+
+      const result = resolveExchange({
+        playerCard: cardKey,
+        enemyCard: prev.enemyIntent,
+        playerStats: stats,
+        enemy: prev.enemy,
+        momentum: prev.momentum,
+      });
+
+      const newPlayerHp = clamp(prev.playerHp - result.playerDamage + result.playerHeal, 0, stats.maxHp);
+      const newEnemyHp = clamp(prev.enemyHp - result.enemyDamage + result.enemyHeal, 0, prev.enemy.maxHp);
+
+      const roundHeader = { text: `— Round ${prev.round} · you played ${CARD_LABELS[cardKey]} —`, type: "system" };
+      const mergedLog = [...prev.log, roundHeader, ...result.log];
+
+      const enemyDefeated = newEnemyHp <= 0;
+      const playerDefeated = newPlayerHp <= 0;
+      const roundCap = prev.round >= 30;
+
+      if (enemyDefeated || playerDefeated || roundCap) {
+        const won = enemyDefeated || (roundCap && newPlayerHp / stats.maxHp >= newEnemyHp / prev.enemy.maxHp && !playerDefeated);
+        const xpGained = won ? Math.round((18 + prev.depth * 6) * (0.9 + Math.random() * 0.2)) : 0;
+
+        return {
+          ...prev,
+          playerHp: newPlayerHp,
+          enemyHp: newEnemyHp,
+          momentum: result.momentumAfter,
+          round: prev.round + 1,
+          log: mergedLog,
+          phase: "ended",
+          outcome: won ? "won" : "lost",
+          xpGained,
+        };
+      }
+
+      const nextIntent = pickEnemyAction(prev.enemy);
+      const nextRevealed = Math.random() * 100 < stats.insightChance;
+
+      return {
+        ...prev,
+        playerHp: newPlayerHp,
+        enemyHp: newEnemyHp,
+        momentum: result.momentumAfter,
+        round: prev.round + 1,
+        log: mergedLog,
+        phase: "awaiting",
+        enemyIntent: nextIntent,
+        intentRevealed: nextRevealed,
+      };
+    });
+  }, [stats]);
+
+  // Apply battle outcome to persistent game state once, when it lands.
+  const appliedOutcomeRef = useRef(null);
+  useEffect(() => {
+    if (!battle || battle.phase !== "ended" || !battle.outcome) return;
+    if (appliedOutcomeRef.current === battle) return;
+    appliedOutcomeRef.current = battle;
+
+    setGameState((prev) => {
+      if (battle.outcome === "won") {
+        const newRunDepth = prev.runDepth + 1;
+        const newCheckpoint = newRunDepth % CHECKPOINT_INTERVAL === 0 ? newRunDepth : prev.checkpoint;
+        const oldLevel = levelFromXp(prev.totalXp).level;
+        const newTotalXp = prev.totalXp + battle.xpGained;
+        const newLevel = levelFromXp(newTotalXp).level;
+
+        if (newLevel > oldLevel) {
+          setToast(`LEVEL UP — now level ${newLevel}`);
+        } else if (newCheckpoint > prev.checkpoint) {
+          setToast(`Checkpoint ${newCheckpoint} secured`);
+        } else {
+          setToast(`+${battle.xpGained} XP`);
+        }
+
+        return {
+          ...prev,
+          runDepth: newRunDepth,
+          checkpoint: Math.max(prev.checkpoint, newCheckpoint),
+          highestDepth: Math.max(prev.highestDepth, newRunDepth),
+          totalWins: prev.totalWins + 1,
+          totalXp: newTotalXp,
+        };
+      }
+
+      setToast(`Defeated — restored to checkpoint ${prev.checkpoint}`);
+      return { ...prev, runDepth: prev.checkpoint };
+    });
+  }, [battle]);
+
+  /* ---------------- RENDER ---------------- */
+
+  if (!hydrated) {
+    return (
+      <div style={{ minHeight: 320, display: "flex", alignItems: "center", justifyContent: "center", background: COLORS.void }}>
+        <style>{GLOBAL_CSS}</style>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, color: COLORS.textMuted, fontFamily: FONT_MONO, fontSize: 11 }}>
+          <Dices className="af-spin" size={16} />
+          Loading save data...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
       style={{
         position: "relative",
         width: "100%",
+        maxWidth: 460,
+        margin: "0 auto",
+        background: COLORS.void,
+        padding: 14,
+        borderRadius: 10,
+        fontFamily: FONT_MONO,
+        boxSizing: "border-box",
       }}
     >
-      <AnimatePresence mode="wait">
-        {phase === "menu" && (
-          <motion.div
-            key="battle-menu"
-            initial={{
-              opacity: 0,
-              y: 8,
-            }}
-            animate={{
-              opacity: 1,
-              y: 0,
-            }}
-            exit={{
-              opacity: 0,
-              y: -8,
-            }}
-          >
-            <Menu
-              levelInfo={levelInfo}
-              stats={stats}
-              gameState={gameState}
-              availablePoints={
-                availablePoints
-              }
-              allocatedPoints={
-                allocatedPoints
-              }
-              hydrated={hydrated}
-              showStats={showStats}
-              onToggleStats={() =>
-                setShowStats(
-                  (value) => !value
-                )
-              }
-              onAllocate={allocate}
-              onReset={resetBuild}
-              onStart={
-                startFromCheckpoint
-              }
-            />
-          </motion.div>
-        )}
-
-        {phase === "battle" &&
-          enemy && (
-            <motion.div
-              key="battle"
-              initial={{
-                opacity: 0,
-                scale: 0.98,
-              }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-              }}
-              exit={{
-                opacity: 0,
-                scale: 0.98,
-              }}
-            >
-              <BattleScreen
-                level={levelInfo.level}
-                depth={
-                  gameState.checkpoint +
-                  1
-                }
-                checkpoint={
-                  gameState.checkpoint
-                }
-                stats={stats}
-                enemy={enemy}
-                combat={combat}
-                fighting={fighting}
-                onFight={fightEnemy}
-                onNext={nextEnemy}
-                onBack={backToMenu}
-              />
-            </motion.div>
-          )}
-      </AnimatePresence>
+      <style>{GLOBAL_CSS}</style>
 
       {phase === "menu" && (
-        <button
-          onClick={onExit}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            margin:
-              "18px auto 0",
-            padding: "8px 4px",
-            background:
-              "transparent",
-            border: "none",
-            color:
-              COLORS.textMuted,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10.5,
-            textTransform:
-              "uppercase",
-            letterSpacing: 1,
-            cursor: "pointer",
-          }}
-        >
-          <ArrowLeft size={12} />
-          Exit
-        </button>
+        <MenuScreen
+          levelInfo={levelInfo}
+          stats={stats}
+          gameState={gameState}
+          availablePoints={availablePoints}
+          allocatedPoints={allocatedPoints}
+          onAllocate={allocate}
+          onReset={resetBuild}
+          onStart={startBattle}
+          onOpenTutorial={openTutorial}
+        />
       )}
-    </div>
-  );
-}
 
-/* ============================================================================
-   MENU
-   ========================================================================== */
+      {phase === "battle" && battle && (
+        <BattleScreen
+          level={levelInfo.level}
+          stats={stats}
+          battle={battle}
+          allocation={gameState.allocation}
+          onPlayCard={playCard}
+          onNext={startBattle}
+          onBack={backToMenu}
+        />
+      )}
 
-function Menu({
-  levelInfo,
-  stats,
-  gameState,
-  availablePoints,
-  allocatedPoints,
-  hydrated,
-  showStats,
-  onToggleStats,
-  onAllocate,
-  onReset,
-  onStart,
-}: {
-  levelInfo: LevelInfo;
-  stats: Stats;
-  gameState: GameState;
-  availablePoints: number;
-  allocatedPoints: number;
-  hydrated: boolean;
-  showStats: boolean;
-  onToggleStats: () => void;
-  onAllocate: (key: StatKey) => void;
-  onReset: () => void;
-  onStart: () => void;
-}) {
-  const xpPct =
-    levelInfo.xpForNextLevel > 0
-      ? levelInfo.xpIntoLevel /
-        levelInfo.xpForNextLevel
-      : 0;
-
-  return (
-    <div>
-      {/* LEVEL / CHECKPOINT */}
-      <div
-        style={{
-          padding:
-            "16px 16px 14px",
-          borderRadius: 6,
-          background:
-            COLORS.panel,
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          marginBottom: 10,
-        }}
-      >
+      {toast && (
         <div
+          className="af-pop"
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent:
-              "space-between",
-            gap: 12,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems:
-                "center",
-              gap: 8,
-            }}
-          >
-            <Zap
-              size={17}
-              color={
-                COLORS.chrome
-              }
-            />
-
-            <div>
-              <div
-                style={{
-                  fontFamily:
-                    FONT_DISPLAY,
-                  fontWeight: 700,
-                  fontSize: 16,
-                  color:
-                    COLORS.text,
-                }}
-              >
-                Level{" "}
-                {levelInfo.level}
-              </div>
-
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  color:
-                    COLORS.textMuted,
-                  marginTop: 2,
-                }}
-              >
-                {allocatedPoints}{" "}
-                allocated ·{" "}
-                {availablePoints}{" "}
-                available
-              </div>
-            </div>
-          </div>
-
-          <div
-            style={{
-              textAlign:
-                "right",
-              fontFamily:
-                FONT_MONO,
-              fontSize: 9,
-              color:
-                COLORS.textMuted,
-            }}
-          >
-            <div>
-              CP{" "}
-              {gameState.checkpoint}
-            </div>
-            <div
-              style={{
-                marginTop: 2,
-              }}
-            >
-              {gameState.totalWins}{" "}
-              wins
-            </div>
-          </div>
-        </div>
-
-        <div
-          style={{
-            height: 6,
-            borderRadius: 3,
-            background:
-              COLORS.void,
-            marginTop: 10,
-            overflow:
-              "hidden",
-          }}
-        >
-          <div
-            style={{
-              height: "100%",
-              width: `${
-                xpPct * 100
-              }%`,
-              background:
-                COLORS.chrome,
-              transition:
-                "width 200ms ease",
-            }}
-          />
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent:
-              "space-between",
-            marginTop: 5,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 8.5,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          <span>
-            {levelInfo.xpIntoLevel}
-            /
-            {levelInfo.xpForNextLevel}{" "}
-            productivity
-          </span>
-
-          <span>
-            Best depth{" "}
-            {gameState.highestDepth}
-          </span>
-        </div>
-      </div>
-
-      {/* BUILD HEADER */}
-      <div
-        style={{
-          display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "space-between",
-          margin:
-            "14px 0 8px",
-        }}
-      >
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              COLORS.textMuted,
-            textTransform:
-              "uppercase",
-            letterSpacing: 1.5,
-          }}
-        >
-          Build your fighter
-        </div>
-
-        <button
-          onClick={onReset}
-          style={{
-            display: "flex",
-            alignItems:
-              "center",
-            gap: 4,
-            padding:
-              "5px 7px",
-            borderRadius: 4,
-            border:
-              `1px solid ${COLORS.panelLine}`,
-            background:
-              COLORS.panel,
-            color:
-              COLORS.textMuted,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 8.5,
-            cursor:
-              "pointer",
-          }}
-        >
-          <RotateCcw
-            size={10}
-          />
-          RESET
-        </button>
-      </div>
-
-      {/* STAT ALLOCATION */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns:
-            "1fr 1fr",
-          gap: 7,
-        }}
-      >
-        {STAT_DEFINITIONS.map(
-          (definition) => {
-            const amount =
-              gameState
-                .allocation[
-                definition.key
-              ];
-
-            return (
-              <StatAllocation
-                key={
-                  definition.key
-                }
-                definition={
-                  definition
-                }
-                amount={amount}
-                canAllocate={
-                  availablePoints >
-                  0
-                }
-                onAllocate={() =>
-                  onAllocate(
-                    definition.key
-                  )
-                }
-              />
-            );
-          }
-        )}
-      </div>
-
-      {/* CURRENT STATS */}
-      <button
-        onClick={
-          onToggleStats
-        }
-        style={{
-          width: "100%",
-          marginTop: 10,
-          padding:
-            "10px 12px",
-          borderRadius: 5,
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          background:
-            COLORS.panel,
-          color:
-            COLORS.textMuted,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 9,
-          textTransform:
-            "uppercase",
-          letterSpacing:
-            0.8,
-          cursor:
-            "pointer",
-        }}
-      >
-        {showStats
-          ? "Hide combat stats"
-          : "Inspect combat stats"}
-      </button>
-
-      <AnimatePresence>
-        {showStats && (
-          <motion.div
-            initial={{
-              opacity: 0,
-              height: 0,
-            }}
-            animate={{
-              opacity: 1,
-              height: "auto",
-            }}
-            exit={{
-              opacity: 0,
-              height: 0,
-            }}
-            style={{
-              overflow:
-                "hidden",
-            }}
-          >
-            <CombatStats
-              stats={stats}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* START */}
-      <button
-        onClick={onStart}
-        disabled={!hydrated}
-        style={{
-          width: "100%",
-          marginTop: 12,
-          padding:
-            "14px 0",
-          borderRadius: 5,
-          border: "none",
-          background:
-            COLORS.chrome,
-          color:
-            COLORS.void,
-          fontFamily:
-            FONT_DISPLAY,
-          fontWeight: 700,
-          fontSize: 13,
-          letterSpacing:
-            0.8,
-          textTransform:
-            "uppercase",
-          cursor:
-            hydrated
-              ? "pointer"
-              : "default",
-          opacity:
-            hydrated
-              ? 1
-              : 0.6,
-          display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
-          gap: 7,
-        }}
-      >
-        <Swords size={15} />
-        Fight next enemy
-      </button>
-
-      <div
-        style={{
-          marginTop: 8,
-          textAlign:
-            "center",
-          fontFamily:
-            FONT_MONO,
-          fontSize: 8.5,
-          color:
-            COLORS.textMuted,
-        }}
-      >
-        Every 5 victories =
-        checkpoint
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================================
-   STAT ALLOCATION CARD
-   ========================================================================== */
-
-function StatAllocation({
-  definition,
-  amount,
-  canAllocate,
-  onAllocate,
-}: {
-  definition: StatDefinition;
-  amount: number;
-  canAllocate: boolean;
-  onAllocate: () => void;
-}) {
-  return (
-    <motion.button
-      whileTap={
-        canAllocate
-          ? { scale: 0.97 }
-          : undefined
-      }
-      onClick={onAllocate}
-      disabled={!canAllocate}
-      style={{
-        minWidth: 0,
-        textAlign:
-          "left",
-        padding:
-          "10px 10px",
-        borderRadius: 5,
-        border:
-          `1px solid ${
-            amount > 0
-              ? `${COLORS.chrome}55`
-              : COLORS.panelLine
-          }`,
-        background:
-          amount > 0
-            ? `${COLORS.chrome}0c`
-            : COLORS.panel,
-        color:
-          COLORS.text,
-        cursor:
-          canAllocate
-            ? "pointer"
-            : "not-allowed",
-        opacity:
-          canAllocate
-            ? 1
-            : 0.62,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems:
-            "center",
-          gap: 6,
-        }}
-      >
-        <span
-          style={{
-            color:
-              amount > 0
-                ? COLORS.chrome
-                : COLORS.textMuted,
-            display: "flex",
-          }}
-        >
-          {definition.icon}
-        </span>
-
-        <span
-          style={{
-            fontFamily:
-              FONT_DISPLAY,
-            fontWeight: 700,
+            position: "fixed",
+            left: "50%",
+            bottom: 20,
+            transform: "translateX(-50%)",
+            background: COLORS.panel,
+            border: `1px solid ${COLORS.chrome}55`,
+            color: COLORS.text,
+            padding: "9px 16px",
+            borderRadius: 6,
+            fontFamily: FONT_MONO,
             fontSize: 11,
-            flex: 1,
-          }}
-        >
-          {definition.name}
-        </span>
-
-        <span
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              amount > 0
-                ? COLORS.chrome
-                : COLORS.textMuted,
             fontWeight: 700,
+            zIndex: 50,
+            boxShadow: "0 6px 24px rgba(0,0,0,0.4)",
           }}
         >
-          +{amount}
-        </span>
-      </div>
+          {toast}
+        </div>
+      )}
 
-      <div
-        style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 8,
-          color:
-            COLORS.textMuted,
-          marginTop: 4,
-          lineHeight: 1.3,
-        }}
-      >
-        {definition.description}
-      </div>
-    </motion.button>
+      {tutorialOpen && <TutorialOverlay step={tutorialStep} onStep={setTutorialStep} onClose={closeTutorial} />}
+    </div>
   );
 }
 
 /* ============================================================================
-   COMBAT STATS
+   TUTORIAL OVERLAY
    ========================================================================== */
 
-function CombatStats({
-  stats,
-}: {
-  stats: Stats;
-}) {
-  const values = [
-    ["HP", formatNumber(stats.maxHp)],
-    ["ATK", formatNumber(stats.attack)],
-    ["DEF", formatNumber(stats.defense)],
-    ["SPD", formatNumber(stats.speed)],
-    ["ACC", pct(stats.accuracy)],
-    ["CRIT", pct(stats.critChance)],
-    [
-      "CRIT DMG",
-      `${stats.critMultiplier.toFixed(
-        2
-      )}x`,
-    ],
-    ["DODGE", pct(stats.dodgeChance)],
-    ["LIFESTEAL", pct(stats.lifesteal)],
-    ["PEN", pct(stats.penetration)],
-    [
-      "FINAL DR",
-      pct(stats.damageReduction),
-    ],
-    [
-      "REGEN",
-      formatNumber(stats.regeneration),
-    ],
-    ["BLOCK", pct(stats.blockChance)],
-    ["COUNTER", pct(stats.counterChance)],
-  ];
+function TutorialOverlay({ step, onStep, onClose }) {
+  const total = TUTORIAL_STEPS.length;
+  const current = TUTORIAL_STEPS[step];
+  const isLast = step === total - 1;
 
   return (
     <div
       style={{
-        display: "grid",
-        gridTemplateColumns:
-          "repeat(2, 1fr)",
-        gap: 5,
-        marginTop: 7,
-        padding: 8,
-        borderRadius: 5,
-        background:
-          COLORS.void,
-        border:
-          `1px solid ${COLORS.panelLine}`,
+        position: "fixed", inset: 0, background: "rgba(6,6,10,0.82)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 100, padding: 18, boxSizing: "border-box",
       }}
     >
-      {values.map(
-        ([label, value]) => (
+      <div
+        className="af-pop"
+        style={{
+          width: "100%", maxWidth: 360, background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`, borderRadius: 10, padding: 20,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div
-            key={label}
             style={{
-              display:
-                "flex",
-              justifyContent:
-                "space-between",
-              gap: 5,
-              fontFamily:
-                FONT_MONO,
-              fontSize: 8.5,
+              width: 38, height: 38, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center",
+              background: `${COLORS.chrome}18`, border: `1px solid ${COLORS.chrome}35`, flexShrink: 0,
             }}
           >
-            <span
-              style={{
-                color:
-                  COLORS.textMuted,
-              }}
-            >
-              {label}
-            </span>
-
-            <span
-              style={{
-                color:
-                  COLORS.text,
-                fontWeight: 700,
-              }}
-            >
-              {value}
-            </span>
+            <current.Icon size={18} color={COLORS.chrome} />
           </div>
-        )
+          <button onClick={onClose} className="af-btn" style={iconButtonStyle}>
+            <X size={14} color={COLORS.textMuted} />
+          </button>
+        </div>
+
+        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, color: COLORS.text, marginTop: 12 }}>
+          {current.title}
+        </div>
+
+        <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, lineHeight: 1.6, color: COLORS.textMuted, marginTop: 8 }}>
+          {current.body}
+        </div>
+
+        <div style={{ display: "flex", gap: 5, justifyContent: "center", marginTop: 18 }}>
+          {TUTORIAL_STEPS.map((_, i) => (
+            <div
+              key={i}
+              style={{
+                width: i === step ? 16 : 6, height: 6, borderRadius: 3,
+                background: i === step ? COLORS.chrome : COLORS.panelLine,
+                transition: "width 200ms ease, background 200ms ease",
+              }}
+            />
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          {step > 0 && (
+            <button
+              onClick={() => onStep(step - 1)}
+              className="af-btn"
+              style={{ ...secondaryButtonStyle, flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
+            >
+              <ChevronLeft size={13} /> Back
+            </button>
+          )}
+          <button
+            onClick={() => (isLast ? onClose() : onStep(step + 1))}
+            className="af-btn"
+            style={{ ...primaryButtonStyle, flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
+          >
+            {isLast ? "Start playing" : "Next"}
+            {!isLast && <ChevronRight size={13} />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   MENU SCREEN
+   ========================================================================== */
+
+function MenuScreen({ levelInfo, stats, gameState, availablePoints, allocatedPoints, onAllocate, onReset, onStart, onOpenTutorial }) {
+  const xpPct = levelInfo.xpForNextLevel > 0 ? levelInfo.xpIntoLevel / levelInfo.xpForNextLevel : 0;
+  const nextDepth = gameState.runDepth + 1;
+
+  return (
+    <div className="af-fade">
+      <div style={{ textAlign: "center", marginBottom: 12 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9.5, letterSpacing: 2, color: COLORS.textMuted, textTransform: "uppercase" }}>
+          Card Combat Protocol
+        </div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 26, color: COLORS.text, letterSpacing: 1 }}>
+          ASCENT
+        </div>
+      </div>
+
+      {/* LEVEL CARD */}
+      <div style={{ padding: "15px 15px 13px", borderRadius: 8, background: COLORS.panel, border: `1px solid ${COLORS.panelLine}`, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Sparkles size={17} color={COLORS.chrome} />
+            <div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16, color: COLORS.text }}>
+                Level {levelInfo.level}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, marginTop: 2 }}>
+                {allocatedPoints} allocated · {availablePoints} available
+              </div>
+            </div>
+          </div>
+          <button onClick={onOpenTutorial} className="af-btn" style={iconButtonStyle} aria-label="How to play">
+            <HelpCircle size={16} color={COLORS.textMuted} />
+          </button>
+        </div>
+
+        <div style={{ height: 6, borderRadius: 3, background: COLORS.void, marginTop: 11, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${xpPct * 100}%`, background: COLORS.chrome, transition: "width 300ms ease" }} />
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, fontFamily: FONT_MONO, fontSize: 8.5, color: COLORS.textMuted }}>
+          <span>{levelInfo.xpIntoLevel}/{levelInfo.xpForNextLevel} XP</span>
+          <span>+{pointsForLevel(levelInfo.level)} pts next level</span>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontFamily: FONT_MONO, fontSize: 8.5, color: COLORS.textMuted, borderTop: `1px solid ${COLORS.panelLine}`, paddingTop: 8 }}>
+          <span>CP {gameState.checkpoint} · depth {gameState.runDepth}</span>
+          <span>{gameState.totalWins} wins · best {gameState.highestDepth}</span>
+        </div>
+      </div>
+
+      {/* LOADOUT (cards) PREVIEW */}
+      <div style={{ padding: "10px 12px", borderRadius: 8, background: COLORS.panel, border: `1px solid ${COLORS.panelLine}`, marginBottom: 12 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+          Your loadout
+        </div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+          {CARD_DEFS.map((card) => {
+            const unlocked = card.unlocked(gameState.allocation);
+            return (
+              <div
+                key={card.key}
+                title={unlocked ? card.name : `${card.name} — ${card.hint}`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5, padding: "6px 9px", borderRadius: 5,
+                  background: unlocked ? `${COLORS.chrome}0f` : COLORS.void,
+                  border: `1px solid ${unlocked ? `${COLORS.chrome}40` : COLORS.panelLine}`,
+                  opacity: unlocked ? 1 : 0.55,
+                }}
+              >
+                {unlocked ? <card.Icon size={12} color={COLORS.chrome} /> : <Lock size={11} color={COLORS.textMuted} />}
+                <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: unlocked ? COLORS.text : COLORS.textMuted }}>
+                  {card.name}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* BUILD HEADER */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "4px 0 8px" }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: 1.5 }}>
+          Build your loadout
+        </div>
+        <button onClick={onReset} className="af-btn" style={{ ...secondaryButtonStyle, display: "flex", alignItems: "center", gap: 4, padding: "5px 8px", fontSize: 8.5 }}>
+          <RotateCcw size={10} /> RESET
+        </button>
+      </div>
+
+      {GROUP_ORDER.map((group) => (
+        <div key={group} style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, margin: "2px 0 6px" }}>
+            <div style={{ width: 6, height: 6, borderRadius: 2, background: GROUP_COLOR[group] }} />
+            <span style={{ fontFamily: FONT_MONO, fontSize: 8.5, color: COLORS.textMuted, letterSpacing: 1.5 }}>{group}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+            {STAT_DEFINITIONS.filter((d) => d.group === group).map((def) => (
+              <StatCard
+                key={def.key}
+                definition={def}
+                amount={gameState.allocation[def.key]}
+                stats={stats}
+                availablePoints={availablePoints}
+                onAllocate={onAllocate}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+
+      <button
+        onClick={onStart}
+        className="af-btn"
+        style={{ ...primaryButtonStyle, width: "100%", marginTop: 10, padding: "14px 0", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}
+      >
+        <Swords size={15} />
+        Fight depth {nextDepth}
+      </button>
+
+      <div style={{ marginTop: 8, textAlign: "center", fontFamily: FONT_MONO, fontSize: 8.5, color: COLORS.textMuted }}>
+        Every {CHECKPOINT_INTERVAL} wins = checkpoint
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   STAT CARD
+   ========================================================================== */
+
+function StatCard({ definition, amount, stats, availablePoints, onAllocate }) {
+  const canAllocate = availablePoints > 0;
+  const value = definition.getValue(stats);
+  const groupColor = GROUP_COLOR[definition.group];
+
+  return (
+    <div
+      style={{
+        minWidth: 0, padding: "10px 10px 9px", borderRadius: 6,
+        border: `1px solid ${amount > 0 ? `${groupColor}55` : COLORS.panelLine}`,
+        background: amount > 0 ? `${groupColor}0c` : COLORS.panel,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ color: amount > 0 ? groupColor : COLORS.textMuted, display: "flex" }}>
+          <definition.Icon size={14} />
+        </span>
+        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 11, color: COLORS.text, flex: 1 }}>
+          {definition.name}
+        </span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: amount > 0 ? groupColor : COLORS.textMuted, fontWeight: 700 }}>
+          +{amount}
+        </span>
+      </div>
+
+      <div style={{ fontFamily: FONT_MONO, fontSize: 7.5, color: COLORS.textMuted, marginTop: 4, lineHeight: 1.35, minHeight: 20 }}>
+        {definition.blurb}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 7 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, color: COLORS.text }}>
+          {definition.kind === "critical"
+            ? `${pct(value)} · ${stats.critMultiplier.toFixed(2)}x`
+            : definition.format(value)}
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button
+            onClick={() => onAllocate(definition.key, 1)}
+            disabled={!canAllocate}
+            className="af-btn"
+            style={{ ...allocateButtonStyle, opacity: canAllocate ? 1 : 0.4 }}
+          >
+            +1
+          </button>
+          <button
+            onClick={() => onAllocate(definition.key, 10)}
+            disabled={!canAllocate}
+            className="af-btn"
+            style={{ ...allocateButtonStyle, opacity: canAllocate ? 1 : 0.4 }}
+          >
+            +10
+          </button>
+        </div>
+      </div>
+
+      {definition.kind === "asymptotic" && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ height: 4, borderRadius: 2, background: COLORS.void, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${clamp((value / definition.ceiling) * 100, 0, 100)}%`, background: groupColor, transition: "width 250ms ease" }} />
+          </div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 6.5, color: COLORS.textMuted, marginTop: 2 }}>
+            → {definition.ceiling}% ceiling, never reached
+          </div>
+        </div>
+      )}
+      {definition.kind === "linear" && (
+        <div style={{ fontFamily: FONT_MONO, fontSize: 6.5, color: COLORS.textMuted, marginTop: 6 }}>
+          ∞ no limit
+        </div>
+      )}
+      {definition.kind === "critical" && (
+        <div style={{ fontFamily: FONT_MONO, fontSize: 6.5, color: COLORS.textMuted, marginTop: 6 }}>
+          chance → 100% ceiling · damage ∞
+        </div>
       )}
     </div>
   );
@@ -2010,645 +1107,158 @@ function CombatStats({
    BATTLE SCREEN
    ========================================================================== */
 
-function BattleScreen({
-  level,
-  depth,
-  checkpoint,
-  stats,
-  enemy,
-  combat,
-  fighting,
-  onFight,
-  onNext,
-  onBack,
-}: {
-  level: number;
-  depth: number;
-  checkpoint: number;
-  stats: Stats;
-  enemy: Enemy;
-  combat: CombatResult | null;
-  fighting: boolean;
-  onFight: () => void;
-  onNext: () => void;
-  onBack: () => void;
-}) {
-  const playerHp =
-    combat?.playerHp ??
-    stats.maxHp;
+function BattleScreen({ level, stats, battle, allocation, onPlayCard, onNext, onBack }) {
+  const { enemy, playerHp, enemyHp, depth, momentum, phase, enemyIntent, intentRevealed, log, outcome, xpGained, round } = battle;
 
-  const enemyHp =
-    combat?.enemyHp ??
-    enemy.maxHp;
+  const playerHpPct = clamp(playerHp / stats.maxHp, 0, 1);
+  const enemyHpPct = clamp(enemyHp / enemy.maxHp, 0, 1);
+  const ended = phase === "ended";
 
-  const playerHpPct =
-    Math.max(
-      0,
-      Math.min(
-        1,
-        playerHp /
-          stats.maxHp
-      )
-    );
+  return (
+    <div className="af-fade">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <button onClick={onBack} className="af-btn" style={{ ...secondaryButtonStyle, display: "flex", alignItems: "center", gap: 5, padding: "6px 9px" }}>
+          <ArrowLeft size={11} /> Loadout
+        </button>
+        <div style={{ textAlign: "center", fontFamily: FONT_MONO }}>
+          <div style={{ fontSize: 9, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: 1 }}>Depth {depth}</div>
+          <div style={{ fontSize: 10, color: COLORS.chrome, marginTop: 2 }}>Round {round}</div>
+        </div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted }}>Lv {level}</div>
+      </div>
 
-  const enemyHpPct =
-    Math.max(
-      0,
-      Math.min(
-        1,
-        enemyHp /
-          enemy.maxHp
-      )
-    );
+      {/* ENEMY PANEL */}
+      <div style={{ padding: "14px 13px", borderRadius: 8, background: COLORS.panel, border: `1px solid ${COLORS.panelLine}`, marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", background: `${COLORS.enemy}18`, border: `1px solid ${COLORS.enemy}35`, flexShrink: 0 }}>
+            <Skull size={19} color={COLORS.enemy} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, color: COLORS.text }}>{enemy.name}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, marginTop: 1 }}>
+              Lv {enemy.level} · {enemy.archetypeName}
+            </div>
+          </div>
+        </div>
 
+        <HealthBar label="ENEMY" current={enemyHp} max={enemy.maxHp} percentage={enemyHpPct} tint={COLORS.enemy} />
+
+        {!ended && (
+          <div
+            className={intentRevealed ? "af-pulse" : undefined}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, marginTop: 9, padding: "6px 8px", borderRadius: 5,
+              background: intentRevealed ? `${COLORS.gold}14` : COLORS.void,
+              border: `1px solid ${intentRevealed ? `${COLORS.gold}45` : COLORS.panelLine}`,
+            }}
+          >
+            {intentRevealed ? <Eye size={12} color={COLORS.gold} /> : <Lock size={11} color={COLORS.textMuted} />}
+            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: intentRevealed ? COLORS.gold : COLORS.textMuted }}>
+              {intentRevealed ? `Insight: preparing ${CARD_LABELS[enemyIntent]}` : "Intent unknown — invest in Insight"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* PLAYER PANEL */}
+      <div style={{ padding: "14px 13px", borderRadius: 8, background: COLORS.panel, border: `1px solid ${COLORS.chrome}30`, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", background: `${COLORS.chrome}18`, border: `1px solid ${COLORS.chrome}35` }}>
+            <Trophy size={19} color={COLORS.chrome} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, color: COLORS.text }}>YOU</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, marginTop: 1 }}>
+              {momentum > 0 ? `Combo x${momentum}` : "No combo"}
+            </div>
+          </div>
+          {momentum > 0 && <Flame size={15} color={COLORS.offense} />}
+        </div>
+
+        <HealthBar label="YOU" current={playerHp} max={stats.maxHp} percentage={playerHpPct} tint={COLORS.chrome} />
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5, marginTop: 9 }}>
+          <MiniStat label="ATK" value={formatNumber(stats.attack)} />
+          <MiniStat label="CRIT" value={pct(stats.critChance)} />
+          <MiniStat label="DODGE" value={pct(stats.dodgeChance)} />
+          <MiniStat label="BLOCK" value={pct(stats.blockPct)} />
+        </div>
+      </div>
+
+      {!ended ? (
+        <CardGrid allocation={allocation} onPlayCard={onPlayCard} />
+      ) : (
+        <BattleResult outcome={outcome} xpGained={xpGained} log={log} round={round} onNext={onNext} onBack={onBack} />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   CARD GRID
+   ========================================================================== */
+
+function CardGrid({ allocation, onPlayCard }) {
   return (
     <div>
-      {/* HEADER */}
-      <div
-        style={{
-          display:
-            "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "space-between",
-          marginBottom: 10,
-        }}
-      >
-        <button
-          onClick={onBack}
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap: 5,
-            padding:
-              "6px 8px",
-            borderRadius: 4,
-            border:
-              `1px solid ${COLORS.panelLine}`,
-            background:
-              COLORS.panel,
-            color:
-              COLORS.textMuted,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            cursor:
-              "pointer",
-          }}
-        >
-          <ArrowLeft
-            size={11}
-          />
-          Build
-        </button>
-
-        <div
-          style={{
-            textAlign:
-              "center",
-            fontFamily:
-              FONT_MONO,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 9,
-              color:
-                COLORS.textMuted,
-              textTransform:
-                "uppercase",
-              letterSpacing:
-                1,
-            }}
-          >
-            Enemy {depth}
-          </div>
-
-          <div
-            style={{
-              fontSize: 10,
-              color:
-                COLORS.chrome,
-              marginTop: 2,
-            }}
-          >
-            Checkpoint{" "}
-            {checkpoint}
-          </div>
-        </div>
-
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          Lv {level}
-        </div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: 1.5, margin: "2px 0 7px" }}>
+        Choose your card
       </div>
-
-      {/* ENEMY */}
-      <div
-        style={{
-          padding:
-            "16px 14px",
-          borderRadius: 6,
-          background:
-            COLORS.panel,
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          marginBottom: 9,
-        }}
-      >
-        <div
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap: 10,
-          }}
-        >
-          <div
-            style={{
-              width: 42,
-              height: 42,
-              borderRadius: 6,
-              display:
-                "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              background:
-                "#d9575718",
-              border:
-                "1px solid #d9575735",
-              flexShrink: 0,
-            }}
-          >
-            <Skull
-              size={20}
-              color="#d95757"
-            />
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-              minWidth: 0,
-            }}
-          >
-            <div
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+        {CARD_DEFS.map((card) => {
+          const unlocked = card.unlocked(allocation);
+          return (
+            <button
+              key={card.key}
+              onClick={() => unlocked && onPlayCard(card.key)}
+              disabled={!unlocked}
+              className="af-btn"
               style={{
-                fontFamily:
-                  FONT_DISPLAY,
-                fontWeight: 700,
-                fontSize: 16,
-                color:
-                  COLORS.text,
+                textAlign: "left", padding: "11px 11px", borderRadius: 6,
+                border: `1px solid ${unlocked ? `${COLORS.chrome}40` : COLORS.panelLine}`,
+                background: unlocked ? COLORS.panel : COLORS.void,
+                cursor: unlocked ? "pointer" : "not-allowed",
+                opacity: unlocked ? 1 : 0.5,
               }}
             >
-              {enemy.name}
-            </div>
-
-            <div
-              style={{
-                fontFamily:
-                  FONT_MONO,
-                fontSize: 9,
-                color:
-                  COLORS.textMuted,
-                marginTop: 2,
-              }}
-            >
-              Lv {enemy.level} ·{" "}
-              {enemy.archetype}
-            </div>
-          </div>
-        </div>
-
-        <HealthBar
-          label="ENEMY"
-          current={enemyHp}
-          max={enemy.maxHp}
-          percentage={
-            enemyHpPct
-          }
-          enemy
-        />
-
-        <div
-          style={{
-            display:
-              "grid",
-            gridTemplateColumns:
-              "repeat(3, 1fr)",
-            gap: 5,
-            marginTop: 10,
-          }}
-        >
-          <MiniStat
-            label="HP"
-            value={formatNumber(
-              enemyHp
-            )}
-          />
-          <MiniStat
-            label="ATK"
-            value={formatNumber(
-              enemy.attack
-            )}
-          />
-          <MiniStat
-            label="DEF"
-            value={formatNumber(
-              enemy.defense
-            )}
-          />
-        </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {unlocked ? <card.Icon size={14} color={COLORS.chrome} /> : <Lock size={12} color={COLORS.textMuted} />}
+                <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 11.5, color: COLORS.text }}>{card.name}</span>
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 7.5, color: COLORS.textMuted, marginTop: 4, lineHeight: 1.35 }}>
+                {unlocked ? card.blurb : card.hint}
+              </div>
+            </button>
+          );
+        })}
       </div>
-
-      {/* VS */}
-      <div
-        style={{
-          display:
-            "flex",
-          alignItems:
-            "center",
-          gap: 8,
-          margin:
-            "8px 0",
-        }}
-      >
-        <div
-          style={{
-            flex: 1,
-            height: 1,
-            background:
-              COLORS.panelLine,
-          }}
-        />
-
-        <span
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontWeight: 700,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          VS
-        </span>
-
-        <div
-          style={{
-            flex: 1,
-            height: 1,
-            background:
-              COLORS.panelLine,
-          }}
-        />
-      </div>
-
-      {/* PLAYER */}
-      <div
-        style={{
-          padding:
-            "16px 14px",
-          borderRadius: 6,
-          background:
-            COLORS.panel,
-          border:
-            `1px solid ${COLORS.chrome}35`,
-        }}
-      >
-        <div
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap: 10,
-          }}
-        >
-          <div
-            style={{
-              width: 42,
-              height: 42,
-              borderRadius: 6,
-              display:
-                "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              background:
-                `${COLORS.chrome}18`,
-              border:
-                `1px solid ${COLORS.chrome}35`,
-            }}
-          >
-            <Trophy
-              size={20}
-              color={
-                COLORS.chrome
-              }
-            />
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-            }}
-          >
-            <div
-              style={{
-                fontFamily:
-                  FONT_DISPLAY,
-                fontWeight: 700,
-                fontSize: 16,
-                color:
-                  COLORS.text,
-              }}
-            >
-              YOU
-            </div>
-
-            <div
-              style={{
-                fontFamily:
-                  FONT_MONO,
-                fontSize: 9,
-                color:
-                  COLORS.textMuted,
-                marginTop: 2,
-              }}
-            >
-              Level {level}
-            </div>
-          </div>
-        </div>
-
-        <HealthBar
-          label="YOU"
-          current={playerHp}
-          max={stats.maxHp}
-          percentage={
-            playerHpPct
-          }
-        />
-
-        <div
-          style={{
-            display:
-              "grid",
-            gridTemplateColumns:
-              "repeat(4, 1fr)",
-            gap: 5,
-            marginTop: 10,
-          }}
-        >
-          <MiniStat
-            label="ATK"
-            value={formatNumber(
-              stats.attack
-            )}
-          />
-          <MiniStat
-            label="DEF"
-            value={formatNumber(
-              stats.defense
-            )}
-          />
-          <MiniStat
-            label="DODGE"
-            value={pct(
-              stats.dodgeChance
-            )}
-          />
-          <MiniStat
-            label="CRIT"
-            value={pct(
-              stats.critChance
-            )}
-          />
-        </div>
-      </div>
-
-      {/* FIGHT BUTTON */}
-      {!combat && (
-        <motion.button
-          whileTap={{
-            scale: 0.98,
-          }}
-          onClick={onFight}
-          disabled={fighting}
-          style={{
-            width: "100%",
-            marginTop: 12,
-            padding:
-              "15px 0",
-            borderRadius: 5,
-            border: "none",
-            background:
-              fighting
-                ? COLORS.panelLine
-                : COLORS.chrome,
-            color:
-              fighting
-                ? COLORS.textMuted
-                : COLORS.void,
-            fontFamily:
-              FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 14,
-            letterSpacing:
-              1,
-            textTransform:
-              "uppercase",
-            cursor:
-              fighting
-                ? "wait"
-                : "pointer",
-            display:
-              "flex",
-            alignItems:
-              "center",
-            justifyContent:
-              "center",
-            gap: 7,
-          }}
-        >
-          {fighting ? (
-            <>
-              <Activity
-                size={16}
-              />
-              Simulating...
-            </>
-          ) : (
-            <>
-              <Swords
-                size={16}
-              />
-              Fight
-            </>
-          )}
-        </motion.button>
-      )}
-
-      {/* RESULT */}
-      {combat && (
-        <BattleResult
-          combat={combat}
-          onNext={onNext}
-          onBack={onBack}
-        />
-      )}
     </div>
   );
 }
 
 /* ============================================================================
-   HEALTH BAR
+   HEALTH BAR / MINI STAT
    ========================================================================== */
 
-function HealthBar({
-  label,
-  current,
-  max,
-  percentage,
-  enemy = false,
-}: {
-  label: string;
-  current: number;
-  max: number;
-  percentage: number;
-  enemy?: boolean;
-}) {
+function HealthBar({ label, current, max, percentage, tint }) {
   return (
-    <div
-      style={{
-        marginTop: 12,
-      }}
-    >
-      <div
-        style={{
-          display:
-            "flex",
-          justifyContent:
-            "space-between",
-          marginBottom: 4,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 8,
-          color:
-            COLORS.textMuted,
-        }}
-      >
+    <div style={{ marginTop: 11 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontFamily: FONT_MONO, fontSize: 8, color: COLORS.textMuted }}>
         <span>{label}</span>
-        <span>
-          {formatNumber(
-            current
-          )}{" "}
-          /{" "}
-          {formatNumber(max)}
-        </span>
+        <span>{formatNumber(current)} / {formatNumber(max)}</span>
       </div>
-
-      <div
-        style={{
-          height: 8,
-          borderRadius: 4,
-          background:
-            COLORS.void,
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          overflow:
-            "hidden",
-        }}
-      >
-        <motion.div
-          animate={{
-            width: `${
-              percentage *
-              100
-            }%`,
-          }}
-          transition={{
-            duration:
-              0.35,
-          }}
-          style={{
-            height: "100%",
-            background:
-              enemy
-                ? "#d95757"
-                : COLORS.chrome,
-          }}
-        />
+      <div style={{ height: 8, borderRadius: 4, background: COLORS.void, border: `1px solid ${COLORS.panelLine}`, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${percentage * 100}%`, background: tint, transition: "width 320ms ease" }} />
       </div>
     </div>
   );
 }
 
-/* ============================================================================
-   MINI STAT
-   ========================================================================== */
-
-function MiniStat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
+function MiniStat({ label, value }) {
   return (
-    <div
-      style={{
-        padding:
-          "6px 5px",
-        borderRadius: 4,
-        background:
-          COLORS.void,
-        textAlign:
-          "center",
-      }}
-    >
-      <div
-        style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 7,
-          color:
-            COLORS.textMuted,
-        }}
-      >
-        {label}
-      </div>
-
-      <div
-        style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 9,
-          fontWeight: 700,
-          color:
-            COLORS.text,
-          marginTop: 2,
-        }}
-      >
-        {value}
-      </div>
+    <div style={{ padding: "6px 5px", borderRadius: 4, background: COLORS.void, textAlign: "center" }}>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: COLORS.textMuted }}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: COLORS.text, marginTop: 2 }}>{value}</div>
     </div>
   );
 }
@@ -2657,213 +1267,77 @@ function MiniStat({
    BATTLE RESULT
    ========================================================================== */
 
-function BattleResult({
-  combat,
-  onNext,
-  onBack,
-}: {
-  combat: CombatResult;
-  onNext: () => void;
-  onBack: () => void;
-}) {
-  const won = combat.won;
-
-  /*
-   * Only show the final part of the combat log.
-   *
-   * This keeps the UI compact while preserving the important information.
-   */
-  const visibleLog =
-    combat.log.slice(-7);
+function BattleResult({ outcome, xpGained, log, round, onNext, onBack }) {
+  const won = outcome === "won";
+  const visibleLog = log.slice(-9);
 
   return (
-    <motion.div
-      initial={{
-        opacity: 0,
-        y: 8,
-      }}
-      animate={{
-        opacity: 1,
-        y: 0,
-      }}
-      style={{
-        marginTop: 12,
-      }}
-    >
-      <div
-        style={{
-          padding:
-            "14px 14px",
-          borderRadius: 6,
-          border: `1px solid ${
-            won
-              ? `${COLORS.chrome}55`
-              : "#d9575744"
-          }`,
-          background:
-            COLORS.panel,
-        }}
-      >
-        <div
-          style={{
-            textAlign:
-              "center",
-            fontFamily:
-              FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 19,
-            color:
-              won
-                ? COLORS.chrome
-                : "#d95757",
-          }}
-        >
-          {won
-            ? "VICTORY"
-            : "DEFEATED"}
+    <div className="af-pop" style={{ marginTop: 4 }}>
+      <div style={{ padding: "14px 14px", borderRadius: 8, border: `1px solid ${won ? `${COLORS.chrome}55` : `${COLORS.enemy}44`}`, background: COLORS.panel }}>
+        <div style={{ textAlign: "center", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 19, color: won ? COLORS.chrome : COLORS.enemy }}>
+          {won ? "VICTORY" : "DEFEATED"}
+        </div>
+        <div style={{ textAlign: "center", fontFamily: FONT_MONO, fontSize: 9, color: COLORS.textMuted, marginTop: 3 }}>
+          {round} rounds{won ? ` · +${xpGained} XP` : ""}
         </div>
 
-        <div
-          style={{
-            textAlign:
-              "center",
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-            marginTop: 3,
-          }}
-        >
-          {combat.rounds} combat rounds
-        </div>
-
-        <div
-          style={{
-            marginTop: 11,
-            display:
-              "flex",
-            flexDirection:
-              "column",
-            gap: 4,
-            maxHeight: 145,
-            overflowY:
-              "auto",
-          }}
-        >
-          {visibleLog.map(
-            (entry) => (
-              <div
-                key={
-                  entry.id
-                }
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 8.5,
-                  color:
-                    entry.type ===
-                    "critical"
-                      ? COLORS.chrome
-                      : entry.type ===
-                        "enemy"
-                      ? "#d95757"
-                      : entry.type ===
-                        "heal"
-                      ? "#7fd48a"
-                      : COLORS.textMuted,
-                  padding:
-                    "2px 0",
-                }}
-              >
-                {entry.text}
-              </div>
-            )
-          )}
+        <div className="af-scroll" style={{ marginTop: 11, display: "flex", flexDirection: "column", gap: 4, maxHeight: 150, overflowY: "auto" }}>
+          {visibleLog.map((entry, i) => (
+            <div
+              key={i}
+              style={{
+                fontFamily: FONT_MONO, fontSize: 8.5, padding: "2px 0",
+                color: entry.type === "critical" ? COLORS.chrome
+                  : entry.type === "enemy" ? COLORS.enemy
+                  : entry.type === "heal" ? COLORS.heal
+                  : entry.type === "player" ? COLORS.text
+                  : COLORS.textMuted,
+                fontWeight: entry.text.startsWith("—") ? 700 : 400,
+                opacity: entry.text.startsWith("—") ? 0.7 : 1,
+              }}
+            >
+              {entry.text}
+            </div>
+          ))}
         </div>
 
         {won ? (
-          <button
-            onClick={onNext}
-            style={{
-              width:
-                "100%",
-              marginTop: 12,
-              padding:
-                "13px 0",
-              borderRadius: 5,
-              border:
-                "none",
-              background:
-                COLORS.chrome,
-              color:
-                COLORS.void,
-              fontFamily:
-                FONT_DISPLAY,
-              fontWeight: 700,
-              fontSize: 12,
-              letterSpacing:
-                0.8,
-              textTransform:
-                "uppercase",
-              cursor:
-                "pointer",
-              display:
-                "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              gap: 6,
-            }}
-          >
-            <Dices
-              size={14}
-            />
-            Generate next enemy
+          <button onClick={onNext} className="af-btn" style={{ ...primaryButtonStyle, width: "100%", marginTop: 12, padding: "13px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <Dices size={14} /> Generate next enemy
           </button>
         ) : (
-          <button
-            onClick={onBack}
-            style={{
-              width:
-                "100%",
-              marginTop: 12,
-              padding:
-                "13px 0",
-              borderRadius: 5,
-              border:
-                `1px solid ${COLORS.chrome}55`,
-              background:
-                `${COLORS.chrome}12`,
-              color:
-                COLORS.chrome,
-              fontFamily:
-                FONT_DISPLAY,
-              fontWeight: 700,
-              fontSize: 12,
-              letterSpacing:
-                0.8,
-              textTransform:
-                "uppercase",
-              cursor:
-                "pointer",
-              display:
-                "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              gap: 6,
-            }}
-          >
-            <RotateCcw
-              size={14}
-            />
-            Rebuild at checkpoint
+          <button onClick={onBack} className="af-btn" style={{ ...secondaryButtonStyle, width: "100%", marginTop: 12, padding: "13px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: COLORS.chrome, borderColor: `${COLORS.chrome}55`, background: `${COLORS.chrome}12` }}>
+            <RotateCcw size={14} /> Rebuild at checkpoint
           </button>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
+
+/* ============================================================================
+   SHARED BUTTON STYLES
+   ========================================================================== */
+
+const primaryButtonStyle = {
+  border: "none", background: COLORS.chrome, color: COLORS.void,
+  fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 0.8,
+  textTransform: "uppercase", borderRadius: 6, cursor: "pointer", fontSize: 12,
+};
+
+const secondaryButtonStyle = {
+  border: `1px solid ${COLORS.panelLine}`, background: COLORS.panel, color: COLORS.textMuted,
+  fontFamily: FONT_MONO, fontSize: 9, borderRadius: 5, cursor: "pointer",
+};
+
+const iconButtonStyle = {
+  border: `1px solid ${COLORS.panelLine}`, background: COLORS.panel, borderRadius: 6,
+  width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+};
+
+const allocateButtonStyle = {
+  border: `1px solid ${COLORS.panelLine}`, background: COLORS.void, color: COLORS.text,
+  fontFamily: FONT_MONO, fontSize: 8.5, fontWeight: 700, borderRadius: 4,
+  padding: "3px 6px", cursor: "pointer",
+};
+
