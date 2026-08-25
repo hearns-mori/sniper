@@ -1,82 +1,190 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
-  X,
-  Play,
-  Zap,
-  Trophy,
-  Shield,
-  Sword,
-  Heart,
-  Sparkles,
-  Skull,
-  RefreshCw,
-  ChevronRight,
+  ArrowLeft,
+  ArrowRight,
   Brain,
-  Dice5,
-  Eye,
+  Crosshair,
+  Dices,
   Flame,
+  Heart,
+  Play,
+  RefreshCw,
+  Shield,
+  Skull,
+  Sparkles,
+  Swords,
+  Target,
+  Trophy,
+  Zap,
 } from "lucide-react";
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
 
-type Phase = "menu" | "draft" | "battle" | "result";
+type Phase = "menu" | "build" | "battle" | "result";
 
 interface PhaserShooterProps {
-  /** Lifetime kills across all productivity categories — powers the level. */
   lifetimeKills: number;
   onExit: () => void;
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+type StatKey =
+  | "hp"
+  | "attack"
+  | "defense"
+  | "crit"
+  | "dodge"
+  | "lifesteal"
+  | "damageReduction"
+  | "damageAmp"
+  | "penetration"
+  | "accuracy"
+  | "thorns"
+  | "attackSpeed"
+  | "critDamage"
+  | "execute"
+  | "doubleStrike";
+
+interface Stats {
+  hp: number;
+  maxHp: number;
+  attack: number;
+  defense: number;
+  crit: number;
+  dodge: number;
+  lifesteal: number;
+  damageReduction: number;
+  damageAmp: number;
+  penetration: number;
+  accuracy: number;
+  thorns: number;
+  attackSpeed: number;
+  critDamage: number;
+  execute: number;
+  doubleStrike: number;
+}
+
+interface Enemy {
+  id: number;
+  name: string;
+  title: string;
+  stats: Stats;
+  level: number;
+  rarity: "common" | "elite" | "boss";
+}
+
+interface UpgradeCard {
+  id: string;
+  name: string;
+  description: string;
+  rarity: "common" | "rare" | "epic" | "legendary";
+  apply: (stats: Stats) => Stats;
+  tag: string;
+}
+
+interface BattleLog {
+  id: number;
+  text: string;
+  type: "player" | "enemy" | "critical" | "system";
 }
 
 // ============================================================================
 // STORAGE
 // ============================================================================
 
-const STORAGE_KEY = "tapgame_state_v2";
+const STORAGE_KEY = "phaserShooter_build_v2";
 
 interface SavedState {
-  bestRound: number;
+  bestCheckpoint: number;
   totalWins: number;
   totalRuns: number;
 }
 
-function defaultSavedState(): SavedState {
-  return {
-    bestRound: 0,
-    totalWins: 0,
-    totalRuns: 0,
-  };
-}
-
 function loadSavedState(): SavedState {
-  if (typeof window === "undefined") return defaultSavedState();
+  if (typeof window === "undefined") {
+    return {
+      bestCheckpoint: 0,
+      totalWins: 0,
+      totalRuns: 0,
+    };
+  }
 
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultSavedState();
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+
+    if (!raw) {
+      return {
+        bestCheckpoint: 0,
+        totalWins: 0,
+        totalRuns: 0,
+      };
+    }
 
     const parsed = JSON.parse(raw) as Partial<SavedState>;
 
     return {
-      bestRound: parsed.bestRound ?? 0,
-      totalWins: parsed.totalWins ?? 0,
-      totalRuns: parsed.totalRuns ?? 0,
+      bestCheckpoint: Math.max(0, Number(parsed.bestCheckpoint) || 0),
+      totalWins: Math.max(0, Number(parsed.totalWins) || 0),
+      totalRuns: Math.max(0, Number(parsed.totalRuns) || 0),
     };
   } catch {
-    return defaultSavedState();
+    return {
+      bestCheckpoint: 0,
+      totalWins: 0,
+      totalRuns: 0,
+    };
   }
 }
 
-function saveSavedState(state: SavedState) {
+function saveState(state: SavedState) {
   if (typeof window === "undefined") return;
 
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    // Ignore storage failures.
+    // Ignore localStorage errors.
   }
+}
+
+// ============================================================================
+// RANDOM
+// ============================================================================
+
+let randomId = 0;
+
+function uid(prefix = "id") {
+  randomId += 1;
+  return `${prefix}-${Date.now()}-${randomId}`;
+}
+
+function randomFloat(min: number, max: number) {
+  return Math.random() * (max - min) + min;
+}
+
+function randomInt(min: number, max: number) {
+  return Math.floor(randomFloat(min, max + 1));
+}
+
+function pick<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const result = [...items];
+
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -87,827 +195,858 @@ interface LevelInfo {
   level: number;
   xpIntoLevel: number;
   xpForNextLevel: number;
-  powerMultiplier: number;
+  multiplier: number;
 }
 
-function xpForLevel(_level: number): number {
-  // Preserves the existing integration where 521 lifetime kills = 1 level.
-  return 521;
+function xpForLevel(level: number) {
+  return Math.max(521, Math.floor(521 * Math.pow(1.08, level - 1)));
 }
 
-function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
+function levelFromLifetimeKills(kills: number): LevelInfo {
+  let remaining = Math.max(0, Math.floor(kills));
   let level = 1;
-  let xp = Math.max(0, Math.floor(lifetimeKills));
 
-  while (xp >= xpForLevel(level)) {
-    xp -= xpForLevel(level);
-    level++;
+  while (remaining >= xpForLevel(level)) {
+    remaining -= xpForLevel(level);
+    level += 1;
   }
-
-  /*
-   * Every level compounds the player's baseline.
-   *
-   * Level 1 = 1.00x
-   * Level 2 = 1.22x
-   * Level 3 = 1.49x
-   * Level 4 = 1.82x
-   * ...
-   *
-   * This makes progressing through productivity levels materially
-   * change what the player can survive.
-   */
-  const powerMultiplier = Math.pow(1.22, level - 1);
 
   return {
     level,
-    xpIntoLevel: xp,
+    xpIntoLevel: remaining,
     xpForNextLevel: xpForLevel(level),
-    powerMultiplier,
+    multiplier: Math.pow(level, 1.521),
   };
 }
-
-// ============================================================================
-// TYPES
-// ============================================================================
-
-interface Stats {
-  hp: number;
-  maxHp: number;
-  attack: number;
-  defense: number;
-  dodge: number;
-  crit: number;
-  critDamage: number;
-  damageReduction: number;
-  armorPen: number;
-  lifesteal: number;
-  attackSpeed: number;
-  thorns: number;
-  flatDamageReduction: number;
-  finalDamage: number;
-  healing: number;
-}
-
-interface Card {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: string;
-
-  attack?: number;
-  attackMultiplier?: number;
-  defense?: number;
-  hp?: number;
-  hpMultiplier?: number;
-  dodge?: number;
-  crit?: number;
-  critDamage?: number;
-  damageReduction?: number;
-  armorPen?: number;
-  lifesteal?: number;
-  attackSpeed?: number;
-  thorns?: number;
-  flatDamageReduction?: number;
-  finalDamage?: number;
-  healing?: number;
-}
-
-interface Enemy {
-  name: string;
-  title: string;
-  stats: Stats;
-  cards: Card[];
-  visualSeed: number;
-}
-
-interface BattleLog {
-  attacker: "player" | "enemy";
-  text: string;
-  damage?: number;
-  critical?: boolean;
-  dodged?: boolean;
-}
-
-interface RunState {
-  round: number;
-  checkpoint: number;
-  playerStats: Stats;
-  playerCards: Card[];
-  enemy: Enemy | null;
-}
-
-// ============================================================================
-// RANDOM
-// ============================================================================
-
-function randomInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function randomFloat(min: number, max: number): number {
-  return Math.random() * (max - min) + min;
-}
-
-function pick<T>(array: T[]): T {
-  return array[Math.floor(Math.random() * array.length)];
-}
-
-function shuffle<T>(array: T[]): T[] {
-  const copy = [...array];
-
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-
-  return copy;
-}
-
-// ============================================================================
-// CARD POOL
-// ============================================================================
-
-const CARD_POOL: Card[] = [
-  {
-    id: "berserker",
-    name: "Berserker",
-    description: "+100% attack, but -15% defense.",
-    category: "OFFENSE",
-    icon: "⚔️",
-    attackMultiplier: 2,
-    defense: -15,
-  },
-  {
-    id: "executioner",
-    name: "Executioner",
-    description: "+50% final damage against enemies below 50% HP.",
-    category: "OFFENSE",
-    icon: "🪓",
-    finalDamage: 50,
-  },
-  {
-    id: "double-edge",
-    name: "Double Edge",
-    description: "+150 attack. +10% crit. -10% max HP.",
-    category: "OFFENSE",
-    icon: "🩸",
-    attack: 150,
-    crit: 10,
-    hpMultiplier: 0.9,
-  },
-  {
-    id: "glass-cannon",
-    name: "Glass Cannon",
-    description: "×2.5 attack. Your defense is reduced by 35%.",
-    category: "OFFENSE",
-    icon: "💥",
-    attackMultiplier: 2.5,
-    defense: -35,
-  },
-  {
-    id: "critical-core",
-    name: "Critical Core",
-    description: "+30% critical chance and +75% critical damage.",
-    category: "CRIT",
-    icon: "🎯",
-    crit: 30,
-    critDamage: 75,
-  },
-  {
-    id: "lucky-strike",
-    name: "Lucky Strike",
-    description: "+15% dodge and +20% crit.",
-    category: "CRIT",
-    icon: "🍀",
-    dodge: 15,
-    crit: 20,
-  },
-  {
-    id: "iron-wall",
-    name: "Iron Wall",
-    description: "+50% final damage reduction.",
-    category: "DEFENSE",
-    icon: "🛡️",
-    damageReduction: 50,
-  },
-  {
-    id: "fortress",
-    name: "Fortress",
-    description: "+300 defense and +500 HP.",
-    category: "DEFENSE",
-    icon: "🏰",
-    defense: 300,
-    hp: 500,
-  },
-  {
-    id: "evasion",
-    name: "Phantom Step",
-    description: "+25% dodge.",
-    category: "DEFENSE",
-    icon: "👻",
-    dodge: 25,
-  },
-  {
-    id: "untouchable",
-    name: "Untouchable",
-    description: "+40% dodge, but -20% attack.",
-    category: "DEFENSE",
-    icon: "🌫️",
-    dodge: 40,
-    attackMultiplier: 0.8,
-  },
-  {
-    id: "vampire",
-    name: "Vampire",
-    description: "Recover 15% of damage dealt as HP.",
-    category: "SUSTAIN",
-    icon: "🧛",
-    lifesteal: 15,
-  },
-  {
-    id: "regenerator",
-    name: "Regenerator",
-    description: "Recover 3% max HP every turn.",
-    category: "SUSTAIN",
-    icon: "💚",
-    healing: 3,
-  },
-  {
-    id: "blood-furnace",
-    name: "Blood Furnace",
-    description: "+20% lifesteal and +100 attack.",
-    category: "SUSTAIN",
-    icon: "🔥",
-    lifesteal: 20,
-    attack: 100,
-  },
-  {
-    id: "thorns",
-    name: "Thorns",
-    description: "Reflect 25% of incoming damage.",
-    category: "SUSTAIN",
-    icon: "🌵",
-    thorns: 25,
-  },
-  {
-    id: "armor-piercer",
-    name: "Armor Piercer",
-    description: "Ignore 50% of enemy defense.",
-    category: "UTILITY",
-    icon: "🏹",
-    armorPen: 50,
-  },
-  {
-    id: "absolute-piercer",
-    name: "Absolute Piercer",
-    description: "Ignore 90% of enemy damage reduction.",
-    category: "UTILITY",
-    icon: "🗡️",
-    armorPen: 90,
-  },
-  {
-    id: "momentum",
-    name: "Momentum",
-    description: "+20% attack speed. Each consecutive hit adds +5% damage.",
-    category: "UTILITY",
-    icon: "⚡",
-    attackSpeed: 20,
-  },
-  {
-    id: "overclock",
-    name: "Overclock",
-    description: "+50% attack speed and +25% attack.",
-    category: "UTILITY",
-    icon: "🚀",
-    attackSpeed: 50,
-    attackMultiplier: 1.25,
-  },
-  {
-    id: "heavy-blow",
-    name: "Heavy Blow",
-    description: "+400 attack, but -25% attack speed.",
-    category: "OFFENSE",
-    icon: "🔨",
-    attack: 400,
-    attackSpeed: -25,
-  },
-  {
-    id: "fortified-heart",
-    name: "Fortified Heart",
-    description: "+1000 HP and +10% damage reduction.",
-    category: "DEFENSE",
-    icon: "❤️",
-    hp: 1000,
-    damageReduction: 10,
-  },
-  {
-    id: "counter",
-    name: "Counterstance",
-    description: "+15% dodge and +20% thorns.",
-    category: "DEFENSE",
-    icon: "🥋",
-    dodge: 15,
-    thorns: 20,
-  },
-  {
-    id: "true-power",
-    name: "True Power",
-    description: "+250 attack and ignore 25% defense.",
-    category: "UTILITY",
-    icon: "✨",
-    attack: 250,
-    armorPen: 25,
-  },
-  {
-    id: "survivalist",
-    name: "Survivalist",
-    description: "+25% max HP and +10% healing.",
-    category: "SUSTAIN",
-    icon: "🧬",
-    hpMultiplier: 1.25,
-    healing: 10,
-  },
-  {
-    id: "glass-heart",
-    name: "Glass Heart",
-    description: "×1.8 max HP, but -20% attack.",
-    category: "SUSTAIN",
-    icon: "💎",
-    hpMultiplier: 1.8,
-    attackMultiplier: 0.8,
-  },
-  {
-    id: "annihilator",
-    name: "Annihilator",
-    description: "+75% final damage and +200 attack.",
-    category: "OFFENSE",
-    icon: "☄️",
-    finalDamage: 75,
-    attack: 200,
-  },
-  {
-    id: "last-stand",
-    name: "Last Stand",
-    description: "When below 25% HP, gain +100% attack.",
-    category: "SPECIAL",
-    icon: "☠️",
-    attackMultiplier: 2,
-  },
-  {
-    id: "mirage",
-    name: "Mirage",
-    description: "+30% dodge. Every dodge restores 5% max HP.",
-    category: "SPECIAL",
-    icon: "🌀",
-    dodge: 30,
-    healing: 5,
-  },
-  {
-    id: "juggernaut",
-    name: "Juggernaut",
-    description: "+60% damage reduction, but -35% dodge.",
-    category: "DEFENSE",
-    icon: "🤖",
-    damageReduction: 60,
-    dodge: -35,
-  },
-  {
-    id: "glass-blade",
-    name: "Glass Blade",
-    description: "×3 attack, but -40% max HP.",
-    category: "OFFENSE",
-    icon: "🔪",
-    attackMultiplier: 3,
-    hpMultiplier: 0.6,
-  },
-  {
-    id: "immovable",
-    name: "Immovable",
-    description: "+1000 defense and +20% damage reduction.",
-    category: "DEFENSE",
-    icon: "🗿",
-    defense: 1000,
-    damageReduction: 20,
-  },
-];
 
 // ============================================================================
 // BASE STATS
 // ============================================================================
 
-function basePlayerStats(level: LevelInfo): Stats {
-  const m = level.powerMultiplier;
+function createBaseStats(levelInfo: LevelInfo): Stats {
+  const l = levelInfo.level;
+  const m = levelInfo.multiplier;
 
   return {
-    hp: Math.round(1000 * m),
-    maxHp: Math.round(1000 * m),
-    attack: Math.round(100 * m),
-    defense: Math.round(100 * m),
-    dodge: 5,
+    hp: Math.round(100 + l * 18 * m),
+    maxHp: Math.round(100 + l * 18 * m),
+    attack: Math.round(15 + l * 5 * m),
+    defense: Math.round(5 + l * 2.2 * m),
     crit: 5,
-    critDamage: 100,
-    damageReduction: 0,
-    armorPen: 0,
+    dodge: 5,
     lifesteal: 0,
-    attackSpeed: 100,
+    damageReduction: 0,
+    damageAmp: 0,
+    penetration: 0,
+    accuracy: 90,
     thorns: 0,
-    flatDamageReduction: 0,
-    finalDamage: 0,
-    healing: 0,
+    attackSpeed: 1,
+    critDamage: 150,
+    execute: 0,
+    doubleStrike: 0,
+  };
+}
+
+function cloneStats(stats: Stats): Stats {
+  return { ...stats };
+}
+
+function clampStats(stats: Stats): Stats {
+  return {
+    ...stats,
+    hp: Math.max(1, stats.hp),
+    maxHp: Math.max(1, stats.maxHp),
+    attack: Math.max(1, stats.attack),
+    defense: Math.max(0, stats.defense),
+    crit: Math.min(100, Math.max(0, stats.crit)),
+    dodge: Math.min(75, Math.max(0, stats.dodge)),
+    lifesteal: Math.min(100, Math.max(0, stats.lifesteal)),
+    damageReduction: Math.min(80, Math.max(0, stats.damageReduction)),
+    damageAmp: Math.max(0, stats.damageAmp),
+    penetration: Math.min(100, Math.max(0, stats.penetration)),
+    accuracy: Math.min(100, Math.max(1, stats.accuracy)),
+    thorns: Math.max(0, stats.thorns),
+    attackSpeed: Math.max(0.25, stats.attackSpeed),
+    critDamage: Math.max(100, stats.critDamage),
+    execute: Math.min(100, Math.max(0, stats.execute)),
+    doubleStrike: Math.min(75, Math.max(0, stats.doubleStrike)),
   };
 }
 
 // ============================================================================
-// APPLY CARDS
-// ============================================================================
-
-function applyCard(stats: Stats, card: Card): Stats {
-  const next = { ...stats };
-
-  if (card.attack) next.attack += card.attack;
-  if (card.defense) next.defense += card.defense;
-  if (card.hp) {
-    next.hp += card.hp;
-    next.maxHp += card.hp;
-  }
-
-  if (card.attackMultiplier) {
-    next.attack *= card.attackMultiplier;
-  }
-
-  if (card.hpMultiplier) {
-    next.maxHp *= card.hpMultiplier;
-    next.hp *= card.hpMultiplier;
-  }
-
-  if (card.dodge) next.dodge += card.dodge;
-  if (card.crit) next.crit += card.crit;
-  if (card.critDamage) next.critDamage += card.critDamage;
-  if (card.damageReduction) next.damageReduction += card.damageReduction;
-  if (card.armorPen) next.armorPen += card.armorPen;
-  if (card.lifesteal) next.lifesteal += card.lifesteal;
-  if (card.attackSpeed) next.attackSpeed += card.attackSpeed;
-  if (card.thorns) next.thorns += card.thorns;
-  if (card.flatDamageReduction) next.flatDamageReduction += card.flatDamageReduction;
-  if (card.finalDamage) next.finalDamage += card.finalDamage;
-  if (card.healing) next.healing += card.healing;
-
-  next.maxHp = Math.max(1, Math.round(next.maxHp));
-  next.hp = Math.min(next.maxHp, Math.max(1, Math.round(next.hp)));
-  next.attack = Math.max(1, Math.round(next.attack));
-  next.defense = Math.max(0, Math.round(next.defense));
-  next.dodge = Math.min(75, Math.max(0, next.dodge));
-  next.crit = Math.min(100, Math.max(0, next.crit));
-  next.damageReduction = Math.min(90, Math.max(0, next.damageReduction));
-  next.armorPen = Math.min(100, Math.max(0, next.armorPen));
-  next.lifesteal = Math.min(100, Math.max(0, next.lifesteal));
-  next.attackSpeed = Math.max(25, next.attackSpeed);
-  next.thorns = Math.min(100, Math.max(0, next.thorns));
-
-  return next;
-}
-
-function buildStats(base: Stats, cards: Card[]): Stats {
-  return cards.reduce(applyCard, { ...base });
-}
-
-// ============================================================================
-// ENEMY GENERATION
+// ENEMIES
 // ============================================================================
 
 const ENEMY_NAMES = [
+  "The Unknown",
+  "Iron Fang",
+  "Glass Cannon",
+  "Void Walker",
+  "Blood Hunter",
   "The Gambler",
-  "Iron Wraith",
-  "Void Hunter",
-  "Glass King",
-  "Blood Beast",
-  "The Architect",
-  "Phantom",
-  "Storm Bringer",
+  "Nightmare",
+  "Stone Giant",
+  "Executioner",
+  "Mirror Knight",
+  "Chaos Beast",
   "The Collector",
-  "Chaos Knight",
-  "Red Machine",
-  "Unknown",
+  "Crimson Machine",
+  "Phantom",
+  "Overlord",
 ];
 
 const ENEMY_TITLES = [
-  "reads your build",
-  "came prepared",
-  "is hiding something",
-  "looks unusually strong",
-  "has an unstable build",
-  "chose chaos",
-  "is adapting",
-  "doesn't play fair",
+  "Unpredictable",
+  "Relentless",
+  "Adapted",
+  "Cursed",
+  "Ancient",
+  "Experimental",
+  "Awakened",
+  "Ruthless",
+  "Unknown",
 ];
 
-function generateEnemy(round: number, level: LevelInfo): Enemy {
-  /*
-   * Enemy strength increases exponentially with the round,
-   * while the exact composition is randomized every time.
-   */
-  const roundPower = Math.pow(1.16, round - 1);
-  const levelPower = level.powerMultiplier;
+function createEnemy(
+  checkpoint: number,
+  levelInfo: LevelInfo,
+): Enemy {
+  const difficulty = Math.pow(1.105, checkpoint);
+  const levelScale = Math.pow(levelInfo.level, 0.72);
 
-  const base: Stats = {
-    hp: Math.round(1000 * levelPower * roundPower * randomFloat(0.8, 1.3)),
-    maxHp: 0,
-    attack: Math.round(100 * levelPower * roundPower * randomFloat(0.8, 1.35)),
-    defense: Math.round(100 * levelPower * roundPower * randomFloat(0.7, 1.4)),
-    dodge: randomFloat(0, 20),
-    crit: randomFloat(0, 25),
-    critDamage: 100,
-    damageReduction: 0,
-    armorPen: 0,
+  const baseHp =
+    (115 + levelInfo.level * 14) *
+    difficulty *
+    levelScale;
+
+  const baseAttack =
+    (13 + levelInfo.level * 4) *
+    difficulty *
+    Math.pow(levelScale, 0.65);
+
+  const style = randomInt(0, 7);
+
+  const stats: Stats = {
+    hp: baseHp,
+    maxHp: baseHp,
+    attack: baseAttack,
+    defense: 5 * difficulty,
+    crit: 5,
+    dodge: 5,
     lifesteal: 0,
-    attackSpeed: randomFloat(75, 130),
+    damageReduction: 0,
+    damageAmp: 0,
+    penetration: 0,
+    accuracy: 90,
     thorns: 0,
-    flatDamageReduction: 0,
-    finalDamage: 0,
-    healing: 0,
+    attackSpeed: 1,
+    critDamage: 150,
+    execute: 0,
+    doubleStrike: 0,
   };
 
-  base.maxHp = base.hp;
+  // Every enemy gets a different archetype.
+  switch (style) {
+    case 0:
+      stats.attack *= 1.65;
+      stats.hp *= 0.72;
+      stats.crit += 20;
+      stats.critDamage += 35;
+      break;
 
-  /*
-   * Enemy gets a random number of cards.
-   * Later rounds can produce nastier builds.
-   */
-  const cardCount = Math.min(
-    5,
-    1 + Math.floor((round - 1) / 2)
-  );
+    case 1:
+      stats.hp *= 1.85;
+      stats.defense *= 1.55;
+      stats.attack *= 0.72;
+      stats.damageReduction += 15;
+      break;
 
-  const cards = shuffle(CARD_POOL).slice(0, cardCount);
-  const stats = buildStats(base, cards);
+    case 2:
+      stats.dodge += 30;
+      stats.accuracy += 5;
+      stats.attack *= 0.92;
+      break;
+
+    case 3:
+      stats.attack *= 1.25;
+      stats.lifesteal += 25;
+      stats.thorns += baseAttack * 0.15;
+      break;
+
+    case 4:
+      stats.penetration += 45;
+      stats.damageAmp += 35;
+      stats.defense *= 0.7;
+      break;
+
+    case 5:
+      stats.doubleStrike += 30;
+      stats.attack *= 0.82;
+      stats.attackSpeed = 1.4;
+      break;
+
+    case 6:
+      stats.damageReduction += 25;
+      stats.dodge += 10;
+      stats.attack *= 0.78;
+      break;
+
+    default:
+      stats.hp *= 1.15;
+      stats.attack *= 1.15;
+      stats.crit += 10;
+      stats.dodge += 8;
+      stats.lifesteal += 10;
+      stats.penetration += 10;
+      break;
+  }
+
+  // Random mutations make identical checkpoint enemies unlikely.
+  stats.hp *= randomFloat(0.82, 1.22);
+  stats.attack *= randomFloat(0.84, 1.18);
+  stats.defense *= randomFloat(0.8, 1.2);
+  stats.crit += randomFloat(-4, 8);
+  stats.dodge += randomFloat(-3, 8);
+
+  const rarityRoll = Math.random();
+
+  let rarity: Enemy["rarity"] = "common";
+
+  if (checkpoint > 0 && rarityRoll > 0.9) {
+    rarity = "boss";
+  } else if (rarityRoll > 0.68) {
+    rarity = "elite";
+  }
+
+  if (rarity === "elite") {
+    stats.hp *= 1.25;
+    stats.attack *= 1.18;
+    stats.defense *= 1.15;
+  }
+
+  if (rarity === "boss") {
+    stats.hp *= 1.75;
+    stats.attack *= 1.4;
+    stats.defense *= 1.3;
+  }
+
+  stats.maxHp = stats.hp;
 
   return {
+    id: randomInt(1, 999999999),
     name: pick(ENEMY_NAMES),
     title: pick(ENEMY_TITLES),
-    stats,
-    cards,
-    visualSeed: randomInt(1, 999999),
+    stats: clampStats(stats),
+    level: Math.max(1, levelInfo.level + Math.floor(checkpoint * 0.65)),
+    rarity,
   };
 }
 
 // ============================================================================
-// BATTLE ENGINE
+// UPGRADE CARDS
 // ============================================================================
 
-function effectiveDefense(defense: number, armorPen: number): number {
-  return Math.max(0, defense * (1 - armorPen / 100));
+function card(
+  id: string,
+  name: string,
+  description: string,
+  rarity: UpgradeCard["rarity"],
+  tag: string,
+  apply: (stats: Stats) => Stats,
+): UpgradeCard {
+  return {
+    id,
+    name,
+    description,
+    rarity,
+    tag,
+    apply,
+  };
+}
+
+function createCardPool(): UpgradeCard[] {
+  return [
+    card(
+      "attack25",
+      "+25% Attack",
+      "Increase final attack by 25%.",
+      "common",
+      "OFFENSE",
+      (s) => ({ ...s, attack: s.attack * 1.25 }),
+    ),
+
+    card(
+      "attack50",
+      "+50% Attack",
+      "Massively increase attack.",
+      "rare",
+      "OFFENSE",
+      (s) => ({ ...s, attack: s.attack * 1.5 }),
+    ),
+
+    card(
+      "attack100",
+      "+100 Attack",
+      "Add 100 flat attack.",
+      "common",
+      "OFFENSE",
+      (s) => ({ ...s, attack: s.attack + 100 }),
+    ),
+
+    card(
+      "doubleAttack",
+      "×2 Attack",
+      "Double your current attack.",
+      "legendary",
+      "OFFENSE",
+      (s) => ({ ...s, attack: s.attack * 2 }),
+    ),
+
+    card(
+      "damageAmp25",
+      "+25% Final Damage",
+      "Deal 25% more final damage.",
+      "common",
+      "DAMAGE",
+      (s) => ({ ...s, damageAmp: s.damageAmp + 25 }),
+    ),
+
+    card(
+      "damageAmp50",
+      "+50% Final Damage",
+      "Deal 50% more final damage.",
+      "rare",
+      "DAMAGE",
+      (s) => ({ ...s, damageAmp: s.damageAmp + 50 }),
+    ),
+
+    card(
+      "ignoreDefense",
+      "+35% Penetration",
+      "Ignore 35% of enemy defense.",
+      "rare",
+      "DAMAGE",
+      (s) => ({ ...s, penetration: s.penetration + 35 }),
+    ),
+
+    card(
+      "ignoreDefenseHuge",
+      "Ignore 75% Defense",
+      "Massively penetrate enemy defense.",
+      "legendary",
+      "DAMAGE",
+      (s) => ({ ...s, penetration: s.penetration + 75 }),
+    ),
+
+    card(
+      "crit25",
+      "+25% Critical",
+      "Gain 25 percentage points of critical chance.",
+      "rare",
+      "CRIT",
+      (s) => ({ ...s, crit: s.crit + 25 }),
+    ),
+
+    card(
+      "critDamage",
+      "+100% Critical Damage",
+      "Critical hits deal 100% additional damage.",
+      "epic",
+      "CRIT",
+      (s) => ({ ...s, critDamage: s.critDamage + 100 }),
+    ),
+
+    card(
+      "dodge25",
+      "+25% Dodge",
+      "25% chance to completely avoid an attack.",
+      "rare",
+      "DEFENSE",
+      (s) => ({ ...s, dodge: s.dodge + 25 }),
+    ),
+
+    card(
+      "dodge50",
+      "+50% Dodge",
+      "Huge chance to avoid attacks.",
+      "legendary",
+      "DEFENSE",
+      (s) => ({ ...s, dodge: s.dodge + 50 }),
+    ),
+
+    card(
+      "reduction25",
+      "+25% Damage Reduction",
+      "Take 25% less incoming damage.",
+      "rare",
+      "DEFENSE",
+      (s) => ({ ...s, damageReduction: s.damageReduction + 25 }),
+    ),
+
+    card(
+      "reduction50",
+      "+50% Damage Reduction",
+      "Take dramatically less incoming damage.",
+      "epic",
+      "DEFENSE",
+      (s) => ({ ...s, damageReduction: s.damageReduction + 50 }),
+    ),
+
+    card(
+      "hp50",
+      "+50% Maximum HP",
+      "Multiply your maximum health by 50%.",
+      "common",
+      "SURVIVAL",
+      (s) => {
+        const factor = 1.5;
+
+        return {
+          ...s,
+          maxHp: s.maxHp * factor,
+          hp: s.hp * factor,
+        };
+      },
+    ),
+
+    card(
+      "hp100",
+      "×2 Maximum HP",
+      "Double your maximum health.",
+      "legendary",
+      "SURVIVAL",
+      (s) => ({
+        ...s,
+        maxHp: s.maxHp * 2,
+        hp: s.hp * 2,
+      }),
+    ),
+
+    card(
+      "lifesteal25",
+      "+25% Lifesteal",
+      "Recover 25% of damage dealt as HP.",
+      "rare",
+      "SUSTAIN",
+      (s) => ({ ...s, lifesteal: s.lifesteal + 25 }),
+    ),
+
+    card(
+      "lifesteal50",
+      "+50% Lifesteal",
+      "Recover half of damage dealt.",
+      "epic",
+      "SUSTAIN",
+      (s) => ({ ...s, lifesteal: s.lifesteal + 50 }),
+    ),
+
+    card(
+      "defense50",
+      "+50 Defense",
+      "Add 50 defense.",
+      "common",
+      "DEFENSE",
+      (s) => ({ ...s, defense: s.defense + 50 }),
+    ),
+
+    card(
+      "defense100",
+      "+100 Defense",
+      "Add 100 defense.",
+      "rare",
+      "DEFENSE",
+      (s) => ({ ...s, defense: s.defense + 100 }),
+    ),
+
+    card(
+      "accuracy",
+      "+15% Accuracy",
+      "Reduce the enemy's ability to evade your attacks.",
+      "common",
+      "PRECISION",
+      (s) => ({ ...s, accuracy: s.accuracy + 15 }),
+    ),
+
+    card(
+      "thorns",
+      "+50 Thorns",
+      "Reflect 50 damage whenever attacked.",
+      "common",
+      "REFLECT",
+      (s) => ({ ...s, thorns: s.thorns + 50 }),
+    ),
+
+    card(
+      "thornsPercent",
+      "+20% Thorns",
+      "Reflect 20% of incoming damage.",
+      "epic",
+      "REFLECT",
+      (s) => ({ ...s, thorns: s.thorns + s.attack * 0.2 }),
+    ),
+
+    card(
+      "doubleStrike",
+      "+25% Double Strike",
+      "25% chance to attack twice.",
+      "epic",
+      "SPEED",
+      (s) => ({ ...s, doubleStrike: s.doubleStrike + 25 }),
+    ),
+
+    card(
+      "speed",
+      "+50% Attack Speed",
+      "Attack 50% more often.",
+      "rare",
+      "SPEED",
+      (s) => ({ ...s, attackSpeed: s.attackSpeed * 1.5 }),
+    ),
+
+    card(
+      "execute",
+      "+15% Execute",
+      "Instantly finish enemies below 15% HP.",
+      "epic",
+      "EXECUTE",
+      (s) => ({ ...s, execute: s.execute + 15 }),
+    ),
+
+    card(
+      "berserker",
+      "Berserker",
+      "Gain 75% attack but lose 20% damage reduction.",
+      "epic",
+      "RISK",
+      (s) => ({
+        ...s,
+        attack: s.attack * 1.75,
+        damageReduction: Math.max(0, s.damageReduction - 20),
+      }),
+    ),
+
+    card(
+      "glassCannon",
+      "Glass Cannon",
+      "Double attack, but lose 30% maximum HP.",
+      "legendary",
+      "RISK",
+      (s) => ({
+        ...s,
+        attack: s.attack * 2,
+        maxHp: s.maxHp * 0.7,
+        hp: s.hp * 0.7,
+      }),
+    ),
+
+    card(
+      "fortress",
+      "Fortress",
+      "Double defense and gain 25% damage reduction, but lose 20% attack.",
+      "legendary",
+      "RISK",
+      (s) => ({
+        ...s,
+        defense: s.defense * 2,
+        damageReduction: s.damageReduction + 25,
+        attack: s.attack * 0.8,
+      }),
+    ),
+
+    card(
+      "vampire",
+      "Vampire",
+      "Gain 40% lifesteal and 20% attack.",
+      "epic",
+      "SUSTAIN",
+      (s) => ({
+        ...s,
+        lifesteal: s.lifesteal + 40,
+        attack: s.attack * 1.2,
+      }),
+    ),
+
+    card(
+      "assassin",
+      "Assassin",
+      "Gain 35% crit and 50% critical damage.",
+      "epic",
+      "CRIT",
+      (s) => ({
+        ...s,
+        crit: s.crit + 35,
+        critDamage: s.critDamage + 50,
+      }),
+    ),
+
+    card(
+      "chaos",
+      "???",
+      "Something random happens.",
+      "legendary",
+      "CHAOS",
+      (s) => {
+        const outcomes = [
+          (x: Stats) => ({ ...x, attack: x.attack * 1.8 }),
+          (x: Stats) => ({ ...x, maxHp: x.maxHp * 1.8, hp: x.hp * 1.8 }),
+          (x: Stats) => ({ ...x, dodge: x.dodge + 35 }),
+          (x: Stats) => ({ ...x, crit: x.crit + 40 }),
+          (x: Stats) => ({
+            ...x,
+            damageReduction: x.damageReduction + 30,
+          }),
+          (x: Stats) => ({
+            ...x,
+            penetration: x.penetration + 60,
+          }),
+        ];
+
+        return pick(outcomes)(s);
+      },
+    ),
+  ];
+}
+
+// ============================================================================
+// CARD DRAW
+// ============================================================================
+
+function drawCards(count = 3): UpgradeCard[] {
+  const pool = createCardPool();
+
+  return shuffle(pool).slice(0, count);
+}
+
+// ============================================================================
+// BATTLE
+// ============================================================================
+
+interface BattleResult {
+  winner: "player" | "enemy";
+  playerHp: number;
+  enemyHp: number;
+  logs: BattleLog[];
+  turns: number;
 }
 
 function calculateDamage(
   attacker: Stats,
   defender: Stats,
-  defenderHp: number
 ): {
   damage: number;
   critical: boolean;
+  dodged: boolean;
 } {
-  let attack = attacker.attack;
+  const accuracyRoll = Math.random() * 100;
 
-  if (attacker === undefined) {
-    attack = 1;
-  }
-
-  // Last Stand
-  if (attacker.hp <= attacker.maxHp * 0.25) {
-    attack *= 2;
+  if (accuracyRoll > attacker.accuracy - defender.dodge) {
+    return {
+      damage: 0,
+      critical: false,
+      dodged: true,
+    };
   }
 
   const critical = Math.random() * 100 < attacker.crit;
 
+  const defenseAfterPen =
+    defender.defense *
+    Math.max(0, 1 - attacker.penetration / 100);
+
+  const defenseMultiplier =
+    100 / (100 + Math.max(0, defenseAfterPen));
+
+  let damage =
+    attacker.attack *
+    defenseMultiplier;
+
+  damage *= 1 + attacker.damageAmp / 100;
+
   if (critical) {
-    attack *= 1 + attacker.critDamage / 100;
+    damage *= attacker.critDamage / 100;
   }
 
-  const defense = effectiveDefense(defender.defense, attacker.armorPen);
-
-  /*
-   * Defense follows diminishing returns.
-   * This means stacking defense is powerful but never becomes absolute.
-   */
-  const defenseMultiplier = 100 / (100 + defense);
-
-  let damage = attack * defenseMultiplier;
-
-  /*
-   * Final damage modifiers.
-   */
-  damage *= 1 + attacker.finalDamage / 100;
-
-  /*
-   * Executioner.
-   */
-  if (defenderHp <= defender.maxHp * 0.5) {
-    const executioner = false;
-    if (executioner) {
-      damage *= 1.5;
-    }
-  }
-
-  /*
-   * Defender's final damage reduction.
-   * Attacker armor penetration can partially ignore it.
-   */
-  const remainingReduction =
-    defender.damageReduction *
-    (1 - attacker.armorPen / 100);
-
-  damage *= Math.max(0.05, 1 - remainingReduction / 100);
-
-  damage -= defender.flatDamageReduction;
+  damage *= randomFloat(0.88, 1.12);
 
   return {
-    damage: Math.max(1, Math.round(damage)),
+    damage: Math.max(1, damage),
     critical,
+    dodged: false,
   };
 }
 
-function simulateBattle(
+function runBattle(
   originalPlayer: Stats,
-  originalEnemy: Stats
-): {
-  playerWon: boolean;
-  player: Stats;
-  enemy: Stats;
-  logs: BattleLog[];
-  turns: number;
-} {
-  const player = { ...originalPlayer };
-  const enemy = { ...originalEnemy };
+  originalEnemy: Stats,
+): BattleResult {
+  const player = cloneStats(originalPlayer);
+  const enemy = cloneStats(originalEnemy);
 
   const logs: BattleLog[] = [];
+  let playerHp = player.hp;
+  let enemyHp = enemy.hp;
 
-  let playerHp = player.maxHp;
-  let enemyHp = enemy.maxHp;
+  let turns = 0;
 
-  let turn = 0;
-  let playerStreak = 0;
-  let enemyStreak = 0;
+  const addLog = (
+    text: string,
+    type: BattleLog["type"],
+  ) => {
+    logs.push({
+      id: logs.length,
+      text,
+      type,
+    });
+  };
 
-  /*
-   * Attack speed determines who gets more attacks.
-   * 100 = normal.
-   */
-  const playerInterval = 100 / Math.max(25, player.attackSpeed);
-  const enemyInterval = 100 / Math.max(25, enemy.attackSpeed);
+  while (playerHp > 0 && enemyHp > 0 && turns < 100) {
+    turns += 1;
 
-  let playerTimer = 0;
-  let enemyTimer = 0;
+    // Player attacks.
+    const playerHit = calculateDamage(player, enemy);
 
-  while (playerHp > 0 && enemyHp > 0 && turn < 100) {
-    turn++;
+    if (playerHit.dodged) {
+      addLog("Enemy dodged your attack.", "enemy");
+    } else {
+      let damage = playerHit.damage;
 
-    playerTimer += 1;
-    enemyTimer += 1;
+      damage *= Math.max(
+        0.2,
+        1 - enemy.damageReduction / 100,
+      );
 
-    const playerActs = playerTimer >= playerInterval;
-    const enemyActs = enemyTimer >= enemyInterval;
+      damage = Math.max(1, damage);
 
-    if (playerActs) playerTimer = 0;
-    if (enemyActs) enemyTimer = 0;
+      enemyHp -= damage;
 
-    if (playerActs && enemyHp > 0) {
-      if (Math.random() * 100 < enemy.dodge) {
-        playerStreak = 0;
-
-        logs.push({
-          attacker: "player",
-          text: "Enemy dodged your attack.",
-          dodged: true,
-        });
-      } else {
-        playerStreak++;
-
-        const streakMultiplier = 1 + Math.min(0.5, (playerStreak - 1) * 0.05);
-
-        const adjustedPlayer = {
-          ...player,
-          attack: player.attack * streakMultiplier,
-        };
-
-        const result = calculateDamage(
-          adjustedPlayer,
-          enemy,
-          enemyHp
+      if (playerHit.critical) {
+        addLog(
+          `CRITICAL! You dealt ${Math.round(damage)} damage.`,
+          "critical",
         );
+      } else {
+        addLog(
+          `You dealt ${Math.round(damage)} damage.`,
+          "player",
+        );
+      }
 
-        enemyHp -= result.damage;
-
+      if (player.lifesteal > 0) {
         const healing =
-          result.damage * (player.lifesteal / 100);
+          damage * (player.lifesteal / 100);
 
         playerHp = Math.min(
           player.maxHp,
-          playerHp + healing
+          playerHp + healing,
         );
+      }
 
-        logs.push({
-          attacker: "player",
-          text: `You hit for ${result.damage}${result.critical ? " CRIT" : ""}.`,
-          damage: result.damage,
-          critical: result.critical,
-        });
+      if (
+        enemyHp <=
+        enemy.maxHp * (player.execute / 100)
+      ) {
+        enemyHp = 0;
 
-        /*
-         * Thorns.
-         */
-        if (enemy.thorns > 0 && enemyHp > 0) {
-          const reflected =
-            Math.max(1, Math.round(result.damage * enemy.thorns / 100));
-
-          playerHp -= reflected;
-
-          logs.push({
-            attacker: "enemy",
-            text: `Thorns reflected ${reflected}.`,
-            damage: reflected,
-          });
-        }
+        addLog(
+          "EXECUTED. The enemy could not survive.",
+          "critical",
+        );
       }
     }
 
-    if (enemyActs && playerHp > 0) {
-      if (Math.random() * 100 < player.dodge) {
-        enemyStreak = 0;
+    if (enemyHp <= 0) break;
 
-        logs.push({
-          attacker: "enemy",
-          text: "You dodged the enemy.",
-          dodged: true,
-        });
+    // Double strike.
+    if (Math.random() * 100 < player.doubleStrike) {
+      const second = calculateDamage(player, enemy);
+
+      if (!second.dodged) {
+        let damage =
+          second.damage *
+          Math.max(
+            0.2,
+            1 - enemy.damageReduction / 100,
+          );
+
+        damage = Math.max(1, damage);
+
+        enemyHp -= damage;
+
+        addLog(
+          `DOUBLE STRIKE dealt ${Math.round(damage)} damage.`,
+          second.critical ? "critical" : "player",
+        );
+      }
+    }
+
+    if (enemyHp <= 0) break;
+
+    // Enemy attacks.
+    const enemyHit = calculateDamage(enemy, player);
+
+    if (enemyHit.dodged) {
+      addLog("You dodged the enemy attack.", "player");
+    } else {
+      let damage =
+        enemyHit.damage *
+        Math.max(
+          0.2,
+          1 - player.damageReduction / 100,
+        );
+
+      damage = Math.max(1, damage);
+
+      playerHp -= damage;
+
+      if (enemyHit.critical) {
+        addLog(
+          `Enemy CRIT! You lost ${Math.round(damage)} HP.`,
+          "critical",
+        );
       } else {
-        enemyStreak++;
+        addLog(
+          `Enemy dealt ${Math.round(damage)} damage.`,
+          "enemy",
+        );
+      }
 
-        const streakMultiplier =
-          1 + Math.min(0.5, (enemyStreak - 1) * 0.05);
-
-        const adjustedEnemy = {
-          ...enemy,
-          attack: enemy.attack * streakMultiplier,
-        };
-
-        const result = calculateDamage(
-          adjustedEnemy,
-          player,
-          playerHp
+      if (player.thorns > 0) {
+        const reflected = Math.min(
+          player.thorns,
+          enemyHp,
         );
 
-        playerHp -= result.damage;
+        enemyHp -= reflected;
 
-        logs.push({
-          attacker: "enemy",
-          text: `Enemy hit for ${result.damage}${result.critical ? " CRIT" : ""}.`,
-          damage: result.damage,
-          critical: result.critical,
-        });
-
-        if (player.thorns > 0 && playerHp > 0) {
-          const reflected =
-            Math.max(1, Math.round(result.damage * player.thorns / 100));
-
-          enemyHp -= reflected;
-
-          logs.push({
-            attacker: "player",
-            text: `Your thorns reflected ${reflected}.`,
-            damage: reflected,
-          });
-        }
+        addLog(
+          `Thorns reflected ${Math.round(reflected)} damage.`,
+          "player",
+        );
       }
-    }
 
-    /*
-     * Regeneration / healing.
-     */
-    if (player.healing > 0 && playerHp > 0) {
-      playerHp = Math.min(
-        player.maxHp,
-        playerHp + player.maxHp * (player.healing / 100)
-      );
-    }
+      if (enemy.lifesteal > 0) {
+        const healing =
+          damage * (enemy.lifesteal / 100);
 
-    if (enemy.healing > 0 && enemyHp > 0) {
-      enemyHp = Math.min(
-        enemy.maxHp,
-        enemyHp + enemy.maxHp * (enemy.healing / 100)
-      );
+        enemyHp = Math.min(
+          enemy.maxHp,
+          enemyHp + healing,
+        );
+      }
     }
   }
 
-  player.hp = Math.max(0, Math.round(playerHp));
-  enemy.hp = Math.max(0, Math.round(enemyHp));
+  const winner =
+    playerHp > 0 && enemyHp <= 0
+      ? "player"
+      : "enemy";
 
   return {
-    playerWon: playerHp > 0 && enemyHp <= 0,
-    player,
-    enemy,
-    logs: logs.slice(-14),
-    turns: turn,
+    winner,
+    playerHp: Math.max(0, playerHp),
+    enemyHp: Math.max(0, enemyHp),
+    logs: logs.slice(-30),
+    turns,
   };
 }
 
@@ -915,11 +1054,11 @@ function simulateBattle(
 // FORMAT
 // ============================================================================
 
-function formatNumber(n: number): string {
-  const value = Math.round(n);
+function formatNumber(value: number): string {
+  if (!Number.isFinite(value)) return "0";
 
   if (Math.abs(value) < 1000) {
-    return value.toString();
+    return Math.round(value).toString();
   }
 
   return new Intl.NumberFormat("en-US", {
@@ -928,107 +1067,23 @@ function formatNumber(n: number): string {
   }).format(value);
 }
 
-function formatPercent(n: number): string {
-  return `${Math.round(n)}%`;
+function formatPercent(value: number) {
+  return `${Math.round(value)}%`;
 }
 
-// ============================================================================
-// CARD DESCRIPTION
-// ============================================================================
-
-function CardStatPreview({ card }: { card: Card }) {
-  const items: string[] = [];
-
-  if (card.attack) items.push(`${card.attack > 0 ? "+" : ""}${card.attack} ATK`);
-  if (card.attackMultiplier)
-    items.push(`×${card.attackMultiplier} ATK`);
-  if (card.defense) items.push(`${card.defense > 0 ? "+" : ""}${card.defense} DEF`);
-  if (card.hp) items.push(`${card.hp > 0 ? "+" : ""}${card.hp} HP`);
-  if (card.hpMultiplier)
-    items.push(`×${card.hpMultiplier} HP`);
-  if (card.dodge) items.push(`${card.dodge > 0 ? "+" : ""}${card.dodge}% DODGE`);
-  if (card.crit) items.push(`+${card.crit}% CRIT`);
-  if (card.damageReduction)
-    items.push(`+${card.damageReduction}% REDUCTION`);
-  if (card.armorPen) items.push(`+${card.armorPen}% PEN`);
-  if (card.lifesteal) items.push(`+${card.lifesteal}% LIFESTEAL`);
-  if (card.thorns) items.push(`+${card.thorns}% THORNS`);
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 5,
-        marginTop: 8,
-      }}
-    >
-      {items.slice(0, 4).map((item) => (
-        <span
-          key={item}
-          style={{
-            padding: "3px 5px",
-            borderRadius: 3,
-            background: `${COLORS.chrome}12`,
-            color: COLORS.chrome,
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-          }}
-        >
-          {item}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ============================================================================
-// STAT BAR
-// ============================================================================
-
-function StatRow({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        minWidth: 0,
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>{icon}</span>
-
-      <span
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 8.5,
-          color: COLORS.textMuted,
-          flex: 1,
-        }}
-      >
-        {label}
-      </span>
-
-      <span
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 9,
-          fontWeight: 700,
-          color: COLORS.text,
-        }}
-      >
-        {value}
-      </span>
-    </div>
-  );
+function rarityColor(
+  rarity: UpgradeCard["rarity"],
+): string {
+  switch (rarity) {
+    case "legendary":
+      return "#ffd166";
+    case "epic":
+      return "#c77dff";
+    case "rare":
+      return "#5dade2";
+    default:
+      return COLORS.chrome;
+  }
 }
 
 // ============================================================================
@@ -1039,423 +1094,381 @@ export default function PhaserShooter({
   lifetimeKills,
   onExit,
 }: PhaserShooterProps) {
-  const [phase, setPhase] = useState<Phase>("menu");
-  const [hydrated, setHydrated] = useState(false);
-
-  const [saved, setSaved] = useState<SavedState>(() =>
-    defaultSavedState()
-  );
-
-  const [round, setRound] = useState(1);
-  const [checkpoint, setCheckpoint] = useState(1);
-
-  const [playerCards, setPlayerCards] = useState<Card[]>([]);
-  const [choices, setChoices] = useState<Card[]>([]);
-  const [enemy, setEnemy] = useState<Enemy | null>(null);
-
-  const [battleResult, setBattleResult] = useState<ReturnType<
-    typeof simulateBattle
-  > | null>(null);
-
-  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
-
-  const [toast, setToast] = useState<string | null>(null);
-
   const levelInfo = useMemo(
     () => levelFromLifetimeKills(lifetimeKills),
-    [lifetimeKills]
+    [lifetimeKills],
   );
 
-  const baseStats = useMemo(
-    () => basePlayerStats(levelInfo),
-    [levelInfo]
-  );
+  const [phase, setPhase] =
+    useState<Phase>("menu");
 
-  const playerStats = useMemo(
-    () => buildStats(baseStats, playerCards),
-    [baseStats, playerCards]
-  );
+  const [saved, setSaved] =
+    useState<SavedState>(() => loadSavedState());
+
+  const [checkpoint, setCheckpoint] =
+    useState(0);
+
+  const [playerStats, setPlayerStats] =
+    useState<Stats>(() => createBaseStats(levelInfo));
+
+  const [enemy, setEnemy] =
+    useState<Enemy | null>(null);
+
+  const [cards, setCards] =
+    useState<UpgradeCard[]>([]);
+
+  const [selectedCards, setSelectedCards] =
+    useState<string[]>([]);
+
+  const [battle, setBattle] =
+    useState<BattleResult | null>(null);
+
+  const [battleStep, setBattleStep] =
+    useState(0);
+
+  const [isHydrated, setIsHydrated] =
+    useState(false);
 
   // --------------------------------------------------------------------------
-  // LOAD
+  // Hydration
   // --------------------------------------------------------------------------
 
   useEffect(() => {
     setSaved(loadSavedState());
-    setHydrated(true);
+    setIsHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (hydrated) {
-      saveSavedState(saved);
-    }
-  }, [saved, hydrated]);
+    if (!isHydrated) return;
+
+    saveState(saved);
+  }, [saved, isHydrated]);
 
   // --------------------------------------------------------------------------
-  // NEW RUN
+  // Start
   // --------------------------------------------------------------------------
 
   const startRun = useCallback(() => {
-    const firstEnemy = generateEnemy(1, levelInfo);
+    const base = createBaseStats(levelInfo);
 
-    setRound(1);
-    setCheckpoint(1);
-    setPlayerCards([]);
-    setChoices(shuffle(CARD_POOL).slice(0, 3));
+    setCheckpoint(0);
+    setPlayerStats(base);
+    setSelectedCards([]);
+    setBattle(null);
+    setBattleStep(0);
+
+    const firstEnemy =
+      createEnemy(0, levelInfo);
+
     setEnemy(firstEnemy);
-    setBattleResult(null);
-    setSelectedCard(null);
+    setCards(drawCards(3));
 
     setSaved((prev) => ({
       ...prev,
       totalRuns: prev.totalRuns + 1,
     }));
 
-    setPhase("draft");
+    setPhase("build");
   }, [levelInfo]);
 
   // --------------------------------------------------------------------------
-  // CHOOSE CARD
+  // Pick card
   // --------------------------------------------------------------------------
 
   const chooseCard = useCallback(
-    (card: Card) => {
-      setSelectedCard(card);
+    (upgrade: UpgradeCard) => {
+      setPlayerStats((previous) =>
+        clampStats(
+          upgrade.apply(
+            cloneStats(previous),
+          ),
+        ),
+      );
 
-      const nextCards = [...playerCards, card];
+      setSelectedCards((previous) => [
+        ...previous,
+        upgrade.id,
+      ]);
 
-      setPlayerCards(nextCards);
-
-      /*
-       * Tiny anticipation delay.
-       * The player sees their choice become part of the build before battle.
-       */
-      setTimeout(() => {
-        setPhase("battle");
-      }, 450);
+      setPhase("battle");
     },
-    [playerCards]
+    [],
   );
 
   // --------------------------------------------------------------------------
-  // FIGHT
+  // Fight
   // --------------------------------------------------------------------------
 
   const fight = useCallback(() => {
     if (!enemy) return;
 
-    const result = simulateBattle(playerStats, enemy);
-
-    setBattleResult(result);
-    setPhase("result");
-  }, [enemy, playerStats]);
-
-  // --------------------------------------------------------------------------
-  // NEXT ROUND
-  // --------------------------------------------------------------------------
-
-  const nextRound = useCallback(() => {
-    const next = round + 1;
-
-    /*
-     * Checkpoints every 5 rounds.
-     *
-     * The run can keep climbing indefinitely.
-     * Losing later doesn't erase your best reached checkpoint.
-     */
-    const nextCheckpoint =
-      next % 5 === 0 ? next : checkpoint;
-
-    if (next % 5 === 0) {
-      setCheckpoint(next);
-      setToast(`CHECKPOINT ${next} REACHED`);
-    }
-
-    setRound(next);
-
-    const nextEnemy = generateEnemy(next, levelInfo);
-
-    setEnemy(nextEnemy);
-    setChoices(shuffle(CARD_POOL).slice(0, 3));
-    setSelectedCard(null);
-    setBattleResult(null);
-
-    setPhase("draft");
-  }, [round, checkpoint, levelInfo]);
-
-  // --------------------------------------------------------------------------
-  // RETRY FROM CHECKPOINT
-  // --------------------------------------------------------------------------
-
-  const retryCheckpoint = useCallback(() => {
-    const restartRound = checkpoint;
-
-    /*
-     * You keep the cards earned during the current run,
-     * but the enemy is rerolled.
-     *
-     * This creates the "maybe I can beat it with a different
-     * interpretation" feeling.
-     */
-    setRound(restartRound);
-
-    const nextEnemy = generateEnemy(
-      restartRound,
-      levelInfo
+    const result = runBattle(
+      playerStats,
+      enemy.stats,
     );
 
-    setEnemy(nextEnemy);
-    setChoices(shuffle(CARD_POOL).slice(0, 3));
-    setSelectedCard(null);
-    setBattleResult(null);
+    setBattle(result);
+    setBattleStep(0);
+  }, [enemy, playerStats]);
 
-    setPhase("draft");
+  useEffect(() => {
+    if (phase !== "battle") return;
+    if (battle) return;
+
+    const timer = window.setTimeout(
+      fight,
+      350,
+    );
+
+    return () => window.clearTimeout(timer);
+  }, [phase, battle, fight]);
+
+  // --------------------------------------------------------------------------
+  // Battle animation
+  // --------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (!battle) return;
+
+    if (
+      battleStep >= battle.logs.length
+    ) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setBattleStep((previous) =>
+        previous + 1,
+      );
+    }, 420);
+
+    return () => window.clearTimeout(timer);
+  }, [battle, battleStep]);
+
+  // --------------------------------------------------------------------------
+  // Battle finished
+  // --------------------------------------------------------------------------
+
+  const battleFinished =
+    !!battle &&
+    battleStep >= battle.logs.length;
+
+  useEffect(() => {
+    if (!battleFinished || !battle) return;
+
+    if (battle.winner === "enemy") {
+      setSaved((previous) => ({
+        ...previous,
+        bestCheckpoint: Math.max(
+          previous.bestCheckpoint,
+          checkpoint,
+        ),
+      }));
+
+      setPhase("result");
+
+      return;
+    }
+
+    // Player won.
+    setSaved((previous) => ({
+      ...previous,
+      totalWins: previous.totalWins + 1,
+      bestCheckpoint: Math.max(
+        previous.bestCheckpoint,
+        checkpoint + 1,
+      ),
+    }));
+  }, [
+    battleFinished,
+    battle,
+    checkpoint,
+  ]);
+
+  // --------------------------------------------------------------------------
+  // Next enemy
+  // --------------------------------------------------------------------------
+
+  const nextEnemy = useCallback(() => {
+    const nextCheckpoint =
+      checkpoint + 1;
+
+    const next = createEnemy(
+      nextCheckpoint,
+      levelInfo,
+    );
+
+    setCheckpoint(nextCheckpoint);
+    setEnemy(next);
+    setCards(drawCards(3));
+    setBattle(null);
+    setBattleStep(0);
+
+    setPhase("build");
   }, [checkpoint, levelInfo]);
 
   // --------------------------------------------------------------------------
-  // MENU
+  // Restart
   // --------------------------------------------------------------------------
 
-  if (phase === "menu") {
-    return (
-      <div style={{ position: "relative" }}>
-        <MenuScreen
-          levelInfo={levelInfo}
-          saved={saved}
-          hydrated={hydrated}
-          onStart={startRun}
-        />
+  const restartRun = useCallback(() => {
+    startRun();
+  }, [startRun]);
 
+  // --------------------------------------------------------------------------
+  // Render
+  // --------------------------------------------------------------------------
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        position: "relative",
+      }}
+    >
+      <AnimatePresence mode="wait">
+        {phase === "menu" && (
+          <motion.div
+            key="menu"
+            initial={{
+              opacity: 0,
+              y: 10,
+            }}
+            animate={{
+              opacity: 1,
+              y: 0,
+            }}
+            exit={{
+              opacity: 0,
+              y: -10,
+            }}
+          >
+            <Menu
+              levelInfo={levelInfo}
+              saved={saved}
+              hydrated={isHydrated}
+              onStart={startRun}
+            />
+          </motion.div>
+        )}
+
+        {phase === "build" &&
+          enemy && (
+            <motion.div
+              key={`build-${checkpoint}-${enemy.id}`}
+              initial={{
+                opacity: 0,
+                scale: 0.98,
+              }}
+              animate={{
+                opacity: 1,
+                scale: 1,
+              }}
+              exit={{
+                opacity: 0,
+                scale: 0.98,
+              }}
+            >
+              <BuildScreen
+                levelInfo={levelInfo}
+                checkpoint={checkpoint}
+                player={playerStats}
+                enemy={enemy}
+                cards={cards}
+                selectedCards={selectedCards}
+                onChoose={chooseCard}
+              />
+            </motion.div>
+          )}
+
+        {phase === "battle" &&
+          enemy && (
+            <motion.div
+              key="battle"
+              initial={{
+                opacity: 0,
+              }}
+              animate={{
+                opacity: 1,
+              }}
+            >
+              <BattleScreen
+                checkpoint={checkpoint}
+                player={playerStats}
+                enemy={enemy}
+                battle={battle}
+                battleStep={battleStep}
+              />
+            </motion.div>
+          )}
+
+        {phase === "result" &&
+          battle &&
+          enemy && (
+            <motion.div
+              key="result"
+              initial={{
+                opacity: 0,
+                scale: 0.96,
+              }}
+              animate={{
+                opacity: 1,
+                scale: 1,
+              }}
+            >
+              <ResultScreen
+                checkpoint={checkpoint}
+                battle={battle}
+                enemy={enemy}
+                bestCheckpoint={
+                  saved.bestCheckpoint
+                }
+                onRestart={restartRun}
+                onExit={onExit}
+              />
+            </motion.div>
+          )}
+      </AnimatePresence>
+
+      {phase !== "result" && (
         <button
           onClick={onExit}
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            margin: "18px auto 0",
-            padding: "8px 4px",
-            background: "transparent",
+            justifyContent: "center",
+            gap: 5,
+            margin:
+              "18px auto 0",
+            padding:
+              "7px 8px",
             border: "none",
-            color: COLORS.textMuted,
-            fontFamily: FONT_MONO,
-            fontSize: 10.5,
-            textTransform: "uppercase",
+            background:
+              "transparent",
+            color:
+              COLORS.textMuted,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10,
+            textTransform:
+              "uppercase",
             letterSpacing: 1,
             cursor: "pointer",
           }}
         >
-          <X size={12} />
+          <ArrowLeft size={12} />
           Exit
         </button>
-      </div>
-    );
-  }
-
-  // --------------------------------------------------------------------------
-  // GAME
-  // --------------------------------------------------------------------------
-
-  return (
-    <div style={{ position: "relative" }}>
-      {/* HEADER */}
-
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-          }}
-        >
-          <Flame size={14} color={COLORS.chrome} />
-
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              color: COLORS.textMuted,
-            }}
-          >
-            RUN {round}
-          </span>
-
-          <span
-            style={{
-              padding: "3px 5px",
-              borderRadius: 3,
-              background: `${COLORS.chrome}15`,
-              color: COLORS.chrome,
-              fontFamily: FONT_MONO,
-              fontSize: 8,
-            }}
-          >
-            CHECKPOINT {checkpoint}
-          </span>
-        </div>
-
-        <button
-          onClick={() => setPhase("menu")}
-          aria-label="Back to menu"
-          style={{
-            width: 30,
-            height: 30,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: 4,
-            border: `1px solid ${COLORS.panelLine}`,
-            background: COLORS.panel,
-            color: COLORS.text,
-            cursor: "pointer",
-          }}
-        >
-          <X size={14} />
-        </button>
-      </div>
-
-      {/* LEVEL */}
-
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 12,
-          padding: "8px 10px",
-          borderRadius: 5,
-          border: `1px solid ${COLORS.panelLine}`,
-          background: COLORS.panel,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          <Zap size={13} color={COLORS.chrome} />
-
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              color: COLORS.text,
-              fontWeight: 700,
-            }}
-          >
-            LV {levelInfo.level}
-          </span>
-        </div>
-
-        <span
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 9,
-            color: COLORS.chrome,
-          }}
-        >
-          ×{levelInfo.powerMultiplier.toFixed(2)} POWER
-        </span>
-      </div>
-
-      <AnimatePresence mode="wait">
-        {phase === "draft" && (
-          <motion.div
-            key="draft"
-            initial={{ opacity: 0, x: 12 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -12 }}
-          >
-            <DraftScreen
-              round={round}
-              playerStats={playerStats}
-              enemy={enemy}
-              choices={choices}
-              playerCards={playerCards}
-              selectedCard={selectedCard}
-              onChoose={chooseCard}
-            />
-          </motion.div>
-        )}
-
-        {phase === "battle" && enemy && (
-          <motion.div
-            key="battle"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-          >
-            <BattlePreview
-              playerStats={playerStats}
-              enemy={enemy}
-              playerCards={playerCards}
-              selectedCard={selectedCard}
-              onFight={fight}
-            />
-          </motion.div>
-        )}
-
-        {phase === "result" && battleResult && enemy && (
-          <motion.div
-            key="result"
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <ResultScreen
-              round={round}
-              result={battleResult}
-              enemy={enemy}
-              checkpoint={checkpoint}
-              onNext={nextRound}
-              onRetry={retryCheckpoint}
-              onMenu={() => setPhase("menu")}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            style={{
-              position: "absolute",
-              top: -5,
-              left: "50%",
-              transform: "translateX(-50%)",
-              padding: "8px 14px",
-              borderRadius: 20,
-              background: COLORS.chrome,
-              color: COLORS.void,
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              fontWeight: 700,
-              whiteSpace: "nowrap",
-              zIndex: 20,
-            }}
-          >
-            {toast}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      )}
     </div>
   );
 }
 
 // ============================================================================
-// MENU SCREEN
+// MENU
 // ============================================================================
 
-function MenuScreen({
+function Menu({
   levelInfo,
   saved,
   hydrated,
@@ -1466,135 +1479,101 @@ function MenuScreen({
   hydrated: boolean;
   onStart: () => void;
 }) {
+  const xp =
+    levelInfo.xpForNextLevel > 0
+      ? levelInfo.xpIntoLevel /
+        levelInfo.xpForNextLevel
+      : 0;
+
   return (
     <div>
       <div
         style={{
-          padding: "18px 16px",
-          borderRadius: 7,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
+          padding:
+            "18px 16px",
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          background:
+            COLORS.panel,
+          borderRadius: 8,
           marginBottom: 12,
         }}
       >
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
+            justifyContent:
+              "space-between",
+            alignItems:
+              "center",
           }}
         >
           <div
             style={{
               display: "flex",
-              alignItems: "center",
+              alignItems:
+                "center",
               gap: 8,
             }}
           >
-            <Brain size={17} color={COLORS.chrome} />
+            <Sparkles
+              size={17}
+              color={
+                COLORS.chrome
+              }
+            />
 
             <span
               style={{
-                fontFamily: FONT_DISPLAY,
-                fontWeight: 700,
-                fontSize: 16,
-                color: COLORS.text,
+                fontFamily:
+                  FONT_DISPLAY,
+                fontSize: 18,
+                fontWeight: 800,
+                color:
+                  COLORS.text,
               }}
             >
-              Chaos Build
+              Level{" "}
+              {levelInfo.level}
             </span>
           </div>
 
           <span
             style={{
-              fontFamily: FONT_MONO,
+              fontFamily:
+                FONT_MONO,
               fontSize: 9,
-              color: COLORS.chrome,
+              color:
+                COLORS.textMuted,
             }}
           >
-            LV {levelInfo.level}
+            ×
+            {levelInfo.multiplier.toFixed(
+              2,
+            )} power
           </span>
         </div>
 
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            lineHeight: 1.6,
-            color: COLORS.textMuted,
-            marginTop: 10,
+            height: 6,
+            marginTop: 12,
+            borderRadius: 4,
+            background:
+              COLORS.void,
+            overflow:
+              "hidden",
           }}
         >
-          Build a fighter from unpredictable choices.
-          <br />
-          Discover what works. Beat the next thing.
-          <br />
-          <span style={{ color: COLORS.chrome }}>
-            Every enemy is different.
-          </span>
-        </div>
-      </div>
-
-      {/* POWER */}
-
-      <div
-        style={{
-          padding: "14px 16px",
-          borderRadius: 6,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              color: COLORS.textMuted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
+          <motion.div
+            animate={{
+              width:
+                `${xp * 100}%`,
             }}
-          >
-            Productivity level
-          </span>
-
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 11,
-              color: COLORS.chrome,
-              fontWeight: 700,
-            }}
-          >
-            ×{levelInfo.powerMultiplier.toFixed(2)}
-          </span>
-        </div>
-
-        <div
-          style={{
-            height: 5,
-            borderRadius: 3,
-            background: COLORS.void,
-            marginTop: 8,
-            overflow: "hidden",
-          }}
-        >
-          <div
             style={{
               height: "100%",
-              width: `${
-                (levelInfo.xpIntoLevel /
-                  levelInfo.xpForNextLevel) *
-                100
-              }%`,
-              background: COLORS.chrome,
+              background:
+                COLORS.chrome,
             }}
           />
         </div>
@@ -1602,43 +1581,131 @@ function MenuScreen({
         <div
           style={{
             display: "flex",
-            justifyContent: "space-between",
-            marginTop: 6,
-            fontFamily: FONT_MONO,
+            justifyContent:
+              "space-between",
+            marginTop: 5,
+            fontFamily:
+              FONT_MONO,
             fontSize: 8,
-            color: COLORS.textMuted,
+            color:
+              COLORS.textMuted,
           }}
         >
           <span>
-            {levelInfo.xpIntoLevel} / {levelInfo.xpForNextLevel}
+            {formatNumber(
+              levelInfo.xpIntoLevel,
+            )}{" "}
+            XP
           </span>
 
           <span>
-            Each level = 2 days productivity
+            {formatNumber(
+              levelInfo.xpForNextLevel,
+            )}{" "}
+            needed
           </span>
         </div>
       </div>
 
-      {/* STATS */}
+      <div
+        style={{
+          padding:
+            "18px 16px",
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          background:
+            COLORS.panel,
+          borderRadius: 8,
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems:
+              "center",
+            gap: 8,
+            marginBottom: 8,
+          }}
+        >
+          <Brain
+            size={17}
+            color={
+              COLORS.chrome
+            }
+          />
+
+          <span
+            style={{
+              fontFamily:
+                FONT_DISPLAY,
+              fontWeight: 800,
+              color:
+                COLORS.text,
+            }}
+          >
+            UNKNOWN BUILD
+          </span>
+        </div>
+
+        <p
+          style={{
+            margin: 0,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10.5,
+            lineHeight: 1.6,
+            color:
+              COLORS.textMuted,
+          }}
+        >
+          Every run creates a different
+          enemy and a different set of
+          choices. Build your fighter,
+          discover what works, and see
+          what happens next.
+        </p>
+      </div>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 8,
-          marginBottom: 12,
+          gridTemplateColumns:
+            "repeat(3, 1fr)",
+          gap: 7,
+          marginBottom: 14,
         }}
       >
-        <StatTile
-          icon={<Trophy size={14} />}
-          label="Best round"
-          value={`${saved.bestRound}`}
+        <MiniStat
+          icon={
+            <Trophy size={14} />
+          }
+          label="BEST"
+          value={String(
+            saved.bestCheckpoint,
+          )}
         />
 
-        <StatTile
-          icon={<Sword size={14} />}
-          label="Wins"
-          value={formatNumber(saved.totalWins)}
+        <MiniStat
+          icon={
+            <Swords size={14} />
+          }
+          label="WINS"
+          value={String(
+            saved.totalWins,
+          )}
+        />
+
+        <MiniStat
+          icon={
+            <RefreshCw
+              size={14}
+            />
+          }
+          label="RUNS"
+          value={String(
+            saved.totalRuns,
+          )}
         />
       </div>
 
@@ -1648,630 +1715,1087 @@ function MenuScreen({
         style={{
           width: "100%",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          alignItems:
+            "center",
+          justifyContent:
+            "center",
           gap: 8,
-          padding: "14px 0",
-          borderRadius: 5,
+          padding:
+            "14px 12px",
           border: "none",
-          background: COLORS.chrome,
-          color: COLORS.void,
-          fontFamily: FONT_DISPLAY,
-          fontWeight: 700,
+          borderRadius: 6,
+          background:
+            COLORS.chrome,
+          color:
+            COLORS.void,
+          fontFamily:
+            FONT_DISPLAY,
           fontSize: 13,
-          letterSpacing: 0.7,
-          textTransform: "uppercase",
-          cursor: hydrated ? "pointer" : "default",
-          opacity: hydrated ? 1 : 0.5,
+          fontWeight: 800,
+          letterSpacing:
+            0.8,
+          cursor:
+            hydrated
+              ? "pointer"
+              : "default",
+          opacity:
+            hydrated
+              ? 1
+              : 0.5,
         }}
       >
-        <Play size={14} />
-        Enter the unknown
+        <Play size={15} />
+        ENTER THE UNKNOWN
       </button>
     </div>
   );
 }
 
 // ============================================================================
-// DRAFT SCREEN
+// BUILD SCREEN
 // ============================================================================
 
-function DraftScreen({
-  round,
-  playerStats,
+function BuildScreen({
+  levelInfo,
+  checkpoint,
+  player,
   enemy,
-  choices,
-  playerCards,
-  selectedCard,
+  cards,
+  selectedCards,
   onChoose,
 }: {
-  round: number;
-  playerStats: Stats;
-  enemy: Enemy | null;
-  choices: Card[];
-  playerCards: Card[];
-  selectedCard: Card | null;
-  onChoose: (card: Card) => void;
+  levelInfo: LevelInfo;
+  checkpoint: number;
+  player: Stats;
+  enemy: Enemy;
+  cards: UpgradeCard[];
+  selectedCards: string[];
+  onChoose: (
+    card: UpgradeCard,
+  ) => void;
 }) {
   return (
     <div>
-      {/* UNKNOWN HEADER */}
-
       <div
         style={{
-          textAlign: "center",
-          marginBottom: 14,
+          display: "flex",
+          justifyContent:
+            "space-between",
+          alignItems:
+            "center",
+          marginBottom: 10,
         }}
       >
-        <motion.div
-          animate={{ rotate: [0, -3, 3, 0] }}
-          transition={{
-            duration: 1.8,
-            repeat: Infinity,
-          }}
-        >
-          <Dice5
-            size={24}
-            color={COLORS.chrome}
-            style={{ margin: "0 auto" }}
-          />
-        </motion.div>
-
         <div
           style={{
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 17,
-            color: COLORS.text,
-            marginTop: 7,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10,
+            color:
+              COLORS.textMuted,
           }}
         >
-          What happens next?
+          LEVEL{" "}
+          {levelInfo.level}
         </div>
 
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 9.5,
-            color: COLORS.textMuted,
-            marginTop: 3,
+            display: "flex",
+            alignItems:
+              "center",
+            gap: 5,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10,
+            color:
+              COLORS.chrome,
           }}
         >
-          Choose one. You won't know exactly what the enemy has.
+          <Target size={12} />
+          CHECKPOINT{" "}
+          {checkpoint}
         </div>
       </div>
 
-      {/* CURRENT BUILD */}
-
-      <BuildStrip
-        cards={playerCards}
-        stats={playerStats}
-      />
-
-      {/* ENEMY PREVIEW */}
-
-      {enemy && (
-        <div
-          style={{
-            padding: "11px 12px",
-            borderRadius: 6,
-            border: `1px solid ${COLORS.panelLine}`,
-            background: COLORS.panel,
-            marginBottom: 14,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div>
-              <div
-                style={{
-                  fontFamily: FONT_DISPLAY,
-                  fontWeight: 700,
-                  fontSize: 13,
-                  color: COLORS.text,
-                }}
-              >
-                {enemy.name}
-              </div>
-
-              <div
-                style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 8.5,
-                  color: COLORS.textMuted,
-                  marginTop: 2,
-                }}
-              >
-                {enemy.title}
-              </div>
-            </div>
-
-            <Eye size={14} color={COLORS.textMuted} />
-          </div>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 5,
-              marginTop: 9,
-            }}
-          >
-            <MiniStat label="HP" value={formatNumber(enemy.stats.maxHp)} />
-            <MiniStat label="ATK" value={formatNumber(enemy.stats.attack)} />
-            <MiniStat label="DEF" value={formatNumber(enemy.stats.defense)} />
-          </div>
-
-          <div
-            style={{
-              marginTop: 8,
-              fontFamily: FONT_MONO,
-              fontSize: 8,
-              color: COLORS.textMuted,
-            }}
-          >
-            {enemy.cards.length} unknown modifiers equipped
-          </div>
-        </div>
-      )}
-
-      {/* CARDS */}
+      <EnemyPreview enemy={enemy} />
 
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 9,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 1.2,
+          marginTop: 15,
           marginBottom: 8,
+          display: "flex",
+          justifyContent:
+            "space-between",
+          alignItems:
+            "center",
         }}
       >
-        Three possible futures
+        <span
+          style={{
+            fontFamily:
+              FONT_DISPLAY,
+            fontSize: 14,
+            fontWeight: 800,
+            color:
+              COLORS.text,
+          }}
+        >
+          WHAT DO YOU PICK?
+        </span>
+
+        <span
+          style={{
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
+          }}
+        >
+          Choose 1
+        </span>
       </div>
 
       <div
         style={{
           display: "flex",
-          flexDirection: "column",
-          gap: 8,
+          flexDirection:
+            "column",
+          gap: 9,
         }}
       >
-        {choices.map((card, index) => (
-          <DraftCard
-            key={`${card.id}-${index}`}
-            card={card}
-            number={index + 1}
-            selected={selectedCard?.id === card.id}
-            onClick={() => onChoose(card)}
-          />
-        ))}
+        {cards.map(
+          (upgrade) => (
+            <UpgradeCardView
+              key={
+                upgrade.id
+              }
+              upgrade={
+                upgrade
+              }
+              player={
+                player
+              }
+              disabled={selectedCards.includes(
+                upgrade.id,
+              )}
+              onClick={() =>
+                onChoose(
+                  upgrade,
+                )
+              }
+            />
+          ),
+        )}
       </div>
 
       <div
         style={{
           marginTop: 12,
-          textAlign: "center",
-          fontFamily: FONT_MONO,
-          fontSize: 8,
-          color: COLORS.textMuted,
+          textAlign:
+            "center",
+          fontFamily:
+            FONT_MONO,
+          fontSize: 8.5,
+          color:
+            COLORS.textMuted,
         }}
       >
-        There is no perfect choice.
-        <br />
-        <span style={{ color: COLORS.chrome }}>
-          Find out.
-        </span>
+        You cannot know what comes next.
+        Choose based on calculation or
+        intuition.
       </div>
     </div>
   );
 }
 
 // ============================================================================
-// DRAFT CARD
+// ENEMY PREVIEW
 // ============================================================================
 
-function DraftCard({
-  card,
-  number,
-  selected,
-  onClick,
+function EnemyPreview({
+  enemy,
 }: {
-  card: Card;
-  number: number;
-  selected: boolean;
-  onClick: () => void;
+  enemy: Enemy;
 }) {
+  const s = enemy.stats;
+
+  const rarity =
+    enemy.rarity === "boss"
+      ? "#ff6b6b"
+      : enemy.rarity ===
+          "elite"
+        ? "#c77dff"
+        : COLORS.chrome;
+
   return (
-    <motion.button
-      whileHover={{ scale: 1.01 }}
-      whileTap={{ scale: 0.985 }}
-      onClick={onClick}
+    <div
       style={{
-        width: "100%",
-        textAlign: "left",
-        padding: "13px 12px",
-        borderRadius: 6,
-        border: `1px solid ${
-          selected ? COLORS.chrome : COLORS.panelLine
-        }`,
-        background: selected
-          ? `${COLORS.chrome}10`
-          : COLORS.panel,
-        cursor: "pointer",
-        color: COLORS.text,
+        padding:
+          "14px 14px",
+        borderRadius: 8,
+        border:
+          `1px solid ${rarity}55`,
+        background:
+          COLORS.panel,
+        boxShadow:
+          `0 0 20px ${rarity}10`,
       }}
     >
       <div
         style={{
           display: "flex",
-          gap: 10,
-          alignItems: "flex-start",
+          justifyContent:
+            "space-between",
+          alignItems:
+            "center",
         }}
       >
         <div
           style={{
-            width: 34,
-            height: 34,
-            borderRadius: 5,
-            background: `${COLORS.chrome}14`,
             display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 18,
-            flexShrink: 0,
+            alignItems:
+              "center",
+            gap: 8,
           }}
         >
-          {card.icon}
+          <div
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 7,
+              display: "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "center",
+              background:
+                `${rarity}18`,
+            }}
+          >
+            <Skull
+              size={20}
+              color={
+                rarity
+              }
+            />
+          </div>
+
+          <div>
+            <div
+              style={{
+                fontFamily:
+                  FONT_DISPLAY,
+                fontSize: 15,
+                fontWeight: 800,
+                color:
+                  COLORS.text,
+              }}
+            >
+              {enemy.name}
+            </div>
+
+            <div
+              style={{
+                fontFamily:
+                  FONT_MONO,
+                fontSize: 8.5,
+                color:
+                  rarity,
+                textTransform:
+                  "uppercase",
+              }}
+            >
+              {enemy.title} ·{" "}
+              {enemy.rarity}
+            </div>
+          </div>
         </div>
 
-        <div style={{ flex: 1 }}>
+        <div
+          style={{
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
+          }}
+        >
+          LV {enemy.level}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            "repeat(4, 1fr)",
+          gap: 5,
+          marginTop: 12,
+        }}
+      >
+        <StatBox
+          label="HP"
+          value={s.maxHp}
+        />
+
+        <StatBox
+          label="ATK"
+          value={s.attack}
+        />
+
+        <StatBox
+          label="DEF"
+          value={s.defense}
+        />
+
+        <StatBox
+          label="CRIT"
+          value={s.crit}
+          percent
+        />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexWrap:
+            "wrap",
+          gap: 5,
+          marginTop: 8,
+        }}
+      >
+        <Badge>
+          Dodge{" "}
+          {formatPercent(
+            s.dodge,
+          )}
+        </Badge>
+
+        <Badge>
+          Reduce{" "}
+          {formatPercent(
+            s.damageReduction,
+          )}
+        </Badge>
+
+        <Badge>
+          Pen{" "}
+          {formatPercent(
+            s.penetration,
+          )}
+        </Badge>
+
+        <Badge>
+          Speed{" "}
+          {s.attackSpeed.toFixed(
+            1,
+          )}
+        </Badge>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// UPGRADE CARD
+// ============================================================================
+
+function UpgradeCardView({
+  upgrade,
+  player,
+  disabled,
+  onClick,
+}: {
+  upgrade: UpgradeCard;
+  player: Stats;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const color =
+    rarityColor(
+      upgrade.rarity,
+    );
+
+  const preview =
+    upgrade.apply(
+      cloneStats(
+        player,
+      ),
+    );
+
+  return (
+    <motion.button
+      whileHover={
+        !disabled
+          ? {
+              scale: 1.015,
+              y: -2,
+            }
+          : undefined
+      }
+      whileTap={
+        !disabled
+          ? {
+              scale: 0.985,
+            }
+          : undefined
+      }
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: "100%",
+        textAlign:
+          "left",
+        padding:
+          "13px 13px",
+        borderRadius: 7,
+        border:
+          `1px solid ${color}55`,
+        background:
+          COLORS.panel,
+        cursor:
+          disabled
+            ? "default"
+            : "pointer",
+        opacity:
+          disabled
+            ? 0.45
+            : 1,
+        position:
+          "relative",
+        overflow:
+          "hidden",
+      }}
+    >
+      <div
+        style={{
+          position:
+            "absolute",
+          top: 0,
+          left: 0,
+          bottom: 0,
+          width: 3,
+          background:
+            color,
+        }}
+      />
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent:
+            "space-between",
+          gap: 10,
+        }}
+      >
+        <div
+          style={{
+            minWidth: 0,
+          }}
+        >
           <div
             style={{
               display: "flex",
-              alignItems: "center",
+              alignItems:
+                "center",
               gap: 7,
             }}
           >
             <span
               style={{
-                fontFamily: FONT_DISPLAY,
-                fontWeight: 700,
-                fontSize: 13,
+                fontFamily:
+                  FONT_DISPLAY,
+                fontSize: 14,
+                fontWeight: 800,
+                color:
+                  COLORS.text,
               }}
             >
-              {card.name}
+              {upgrade.name}
             </span>
 
             <span
               style={{
-                fontFamily: FONT_MONO,
+                fontFamily:
+                  FONT_MONO,
                 fontSize: 7.5,
-                color: COLORS.chrome,
+                padding:
+                  "2px 5px",
+                borderRadius: 3,
+                background:
+                  `${color}18`,
+                color,
               }}
             >
-              {card.category}
+              {upgrade.rarity}
             </span>
           </div>
 
           <div
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              color: COLORS.textMuted,
+              marginTop: 4,
+              fontFamily:
+                FONT_MONO,
+              fontSize: 9.5,
               lineHeight: 1.45,
-              marginTop: 3,
+              color:
+                COLORS.textMuted,
             }}
           >
-            {card.description}
+            {
+              upgrade.description
+            }
           </div>
-
-          <CardStatPreview card={card} />
         </div>
 
-        <div
+        <ArrowRight
+          size={15}
+          color={color}
           style={{
-            width: 20,
-            height: 20,
-            borderRadius: "50%",
-            border: `1px solid ${COLORS.panelLine}`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
             flexShrink: 0,
+            marginTop: 2,
           }}
-        >
-          {number}
-        </div>
+        />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexWrap:
+            "wrap",
+          gap: 4,
+          marginTop: 8,
+        }}
+      >
+        <PreviewChange
+          label="ATK"
+          before={
+            player.attack
+          }
+          after={
+            preview.attack
+          }
+        />
+
+        <PreviewChange
+          label="HP"
+          before={
+            player.maxHp
+          }
+          after={
+            preview.maxHp
+          }
+        />
+
+        <PreviewChange
+          label="DEF"
+          before={
+            player.defense
+          }
+          after={
+            preview.defense
+          }
+        />
+
+        <PreviewChange
+          label="CRIT"
+          before={
+            player.crit
+          }
+          after={
+            preview.crit
+          }
+          percent
+        />
       </div>
     </motion.button>
   );
 }
 
-// ============================================================================
-// BUILD STRIP
-// ============================================================================
-
-function BuildStrip({
-  cards,
-  stats,
+function PreviewChange({
+  label,
+  before,
+  after,
+  percent = false,
 }: {
-  cards: Card[];
-  stats: Stats;
+  label: string;
+  before: number;
+  after: number;
+  percent?: boolean;
 }) {
+  const difference =
+    after - before;
+
+  if (
+    Math.abs(
+      difference,
+    ) < 0.01
+  ) {
+    return null;
+  }
+
+  const positive =
+    difference > 0;
+
   return (
-    <div
+    <span
       style={{
-        padding: "10px",
-        borderRadius: 6,
-        background: COLORS.panel,
-        border: `1px solid ${COLORS.panelLine}`,
-        marginBottom: 10,
+        padding:
+          "2px 5px",
+        borderRadius: 3,
+        background:
+          positive
+            ? "#7fd48a18"
+            : "#ff6b6b18",
+        color:
+          positive
+            ? "#7fd48a"
+            : "#ff6b6b",
+        fontFamily:
+          FONT_MONO,
+        fontSize: 7.5,
       }}
     >
+      {label}{" "}
+      {positive
+        ? "+"
+        : ""}
+      {percent
+        ? Math.round(
+            difference,
+          )
+        : formatNumber(
+            difference,
+          )}
+      {percent
+        ? "%"
+        : ""}
+    </span>
+  );
+}
+
+// ============================================================================
+// BATTLE SCREEN
+// ============================================================================
+
+function BattleScreen({
+  checkpoint,
+  player,
+  enemy,
+  battle,
+  battleStep,
+}: {
+  checkpoint: number;
+  player: Stats;
+  enemy: Enemy;
+  battle: BattleResult | null;
+  battleStep: number;
+}) {
+  const playerHp =
+    battle
+      ? battle.playerHp
+      : player.hp;
+
+  const enemyHp =
+    battle
+      ? battle.enemyHp
+      : enemy.stats.hp;
+
+  const visibleLogs =
+    battle
+      ? battle.logs.slice(
+          0,
+          battleStep,
+        )
+      : [];
+
+  const playerPct =
+    Math.max(
+      0,
+      playerHp /
+        player.maxHp,
+    );
+
+  const enemyPct =
+    Math.max(
+      0,
+      enemyHp /
+        enemy.stats.maxHp,
+    );
+
+  return (
+    <div>
       <div
         style={{
           display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 8,
+          justifyContent:
+            "space-between",
+          alignItems:
+            "center",
+          marginBottom: 10,
         }}
       >
-        <span
+        <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
           }}
         >
-          Your build
-        </span>
+          CHECKPOINT{" "}
+          {checkpoint}
+        </div>
 
-        <span
+        <motion.div
+          animate={{
+            opacity:
+              battle
+                ? [1, 0.4, 1]
+                : 1,
+          }}
+          transition={{
+            duration: 0.8,
+            repeat:
+              battle
+                ? Infinity
+                : 0,
+          }}
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.chrome,
+            display: "flex",
+            alignItems:
+              "center",
+            gap: 5,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.chrome,
           }}
         >
-          {cards.length} effects
-        </span>
+          <Swords size={12} />
+          FIGHTING
+        </motion.div>
       </div>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr",
-          gap: 5,
+          gridTemplateColumns:
+            "1fr 38px 1fr",
+          gap: 7,
+          alignItems:
+            "center",
         }}
       >
-        <MiniStat label="HP" value={formatNumber(stats.maxHp)} />
-        <MiniStat label="ATK" value={formatNumber(stats.attack)} />
-        <MiniStat label="DEF" value={formatNumber(stats.defense)} />
-        <MiniStat label="DODGE" value={formatPercent(stats.dodge)} />
-        <MiniStat label="CRIT" value={formatPercent(stats.crit)} />
-        <MiniStat label="REDUCE" value={formatPercent(stats.damageReduction)} />
+        <Fighter
+          name="YOU"
+          icon={
+            <Shield
+              size={20}
+            />
+          }
+          hp={playerHp}
+          maxHp={
+            player.maxHp
+          }
+          attack={
+            player.attack
+          }
+          accent={
+            COLORS.chrome
+          }
+        />
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent:
+              "center",
+          }}
+        >
+          <motion.div
+            animate={{
+              rotate: [0, 15, -15, 0],
+            }}
+            transition={{
+              duration: 0.8,
+              repeat:
+                Infinity,
+            }}
+          >
+            <Swords
+              size={22}
+              color={
+                COLORS.chrome
+              }
+            />
+          </motion.div>
+        </div>
+
+        <Fighter
+          name={
+            enemy.name
+          }
+          icon={
+            <Skull
+              size={20}
+            />
+          }
+          hp={enemyHp}
+          maxHp={
+            enemy.stats
+              .maxHp
+          }
+          attack={
+            enemy.stats
+              .attack
+          }
+          accent="#ff6b6b"
+        />
+      </div>
+
+      <div
+        style={{
+          marginTop: 12,
+          padding:
+            "10px 11px",
+          borderRadius: 7,
+          background:
+            COLORS.panel,
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          minHeight: 190,
+          maxHeight: 260,
+          overflowY:
+            "auto",
+        }}
+      >
+        {visibleLogs.length ===
+        0 ? (
+          <div
+            style={{
+              height: 170,
+              display: "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "center",
+              fontFamily:
+                FONT_MONO,
+              fontSize: 10,
+              color:
+                COLORS.textMuted,
+            }}
+          >
+            Calculating outcome...
+          </div>
+        ) : (
+          <div
+            style={{
+              display:
+                "flex",
+              flexDirection:
+                "column",
+              gap: 5,
+            }}
+          >
+            {visibleLogs.map(
+              (log) => (
+                <motion.div
+                  key={
+                    log.id
+                  }
+                  initial={{
+                    opacity: 0,
+                    x: -5,
+                  }}
+                  animate={{
+                    opacity: 1,
+                    x: 0,
+                  }}
+                  style={{
+                    fontFamily:
+                      FONT_MONO,
+                    fontSize: 9,
+                    color:
+                      log.type ===
+                      "critical"
+                        ? "#ffd166"
+                        : log.type ===
+                            "enemy"
+                          ? "#ff8a8a"
+                          : log.type ===
+                              "player"
+                            ? "#8be0a0"
+                            : COLORS.textMuted,
+                  }}
+                >
+                  {log.text}
+                </motion.div>
+              ),
+            )}
+          </div>
+        )}
+      </div>
+
+      {battle && (
+        <div
+          style={{
+            display:
+              "grid",
+            gridTemplateColumns:
+              "1fr 1fr",
+            gap: 7,
+            marginTop: 8,
+          }}
+        >
+          <StatBox
+            label="TURNS"
+            value={
+              battle.turns
+            }
+          />
+
+          <StatBox
+            label="OUTCOME"
+            value={
+              battle.winner ===
+              "player"
+                ? "WIN"
+                : "LOSS"
+            }
+          />
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "none",
+        }}
+      >
+        {playerPct}
+        {enemyPct}
       </div>
     </div>
   );
 }
 
-// ============================================================================
-// BATTLE PREVIEW
-// ============================================================================
-
-function BattlePreview({
-  playerStats,
-  enemy,
-  playerCards,
-  selectedCard,
-  onFight,
+function Fighter({
+  name,
+  icon,
+  hp,
+  maxHp,
+  attack,
+  accent,
 }: {
-  playerStats: Stats;
-  enemy: Enemy;
-  playerCards: Card[];
-  selectedCard: Card | null;
-  onFight: () => void;
+  name: string;
+  icon: React.ReactNode;
+  hp: number;
+  maxHp: number;
+  attack: number;
+  accent: string;
 }) {
+  const hpPct =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        hp / maxHp,
+      ),
+    );
+
   return (
-    <div>
-      {/* VERSUS */}
-
+    <div
+      style={{
+        padding:
+          "12px 10px",
+        borderRadius: 7,
+        background:
+          COLORS.panel,
+        border:
+          `1px solid ${accent}44`,
+      }}
+    >
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 38px 1fr",
-          gap: 7,
-          alignItems: "center",
-          marginBottom: 12,
-        }}
-      >
-        <Combatant
-          title="YOU"
-          hp={playerStats.maxHp}
-          attack={playerStats.attack}
-          defense={playerStats.defense}
-          icon={<Sword size={15} />}
-        />
-
-        <div
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: "50%",
-            background: COLORS.chrome,
-            color: COLORS.void,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 800,
-            fontSize: 10,
-          }}
-        >
-          VS
-        </div>
-
-        <Combatant
-          title={enemy.name}
-          hp={enemy.stats.maxHp}
-          attack={enemy.stats.attack}
-          defense={enemy.stats.defense}
-          icon={<Skull size={15} />}
-        />
-      </div>
-
-      {/* SELECTED */}
-
-      {selectedCard && (
-        <div
-          style={{
-            padding: "9px 11px",
-            borderRadius: 5,
-            background: `${COLORS.chrome}0d`,
-            border: `1px solid ${COLORS.chrome}33`,
-            marginBottom: 12,
-          }}
-        >
-          <div
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 8,
-              color: COLORS.textMuted,
-              textTransform: "uppercase",
-            }}
-          >
-            You chose
-          </div>
-
-          <div
-            style={{
-              fontFamily: FONT_DISPLAY,
-              fontWeight: 700,
-              fontSize: 12,
-              color: COLORS.chrome,
-              marginTop: 3,
-            }}
-          >
-            {selectedCard.icon} {selectedCard.name}
-          </div>
-        </div>
-      )}
-
-      {/* BUILD */}
-
-      <div
-        style={{
-          padding: 12,
-          borderRadius: 6,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            marginBottom: 8,
-          }}
-        >
-          Final matchup
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 7,
-          }}
-        >
-          <StatRow
-            icon={<Heart size={11} />}
-            label="HP"
-            value={formatNumber(playerStats.maxHp)}
-          />
-
-          <StatRow
-            icon={<Sword size={11} />}
-            label="Attack"
-            value={formatNumber(playerStats.attack)}
-          />
-
-          <StatRow
-            icon={<Shield size={11} />}
-            label="Defense"
-            value={formatNumber(playerStats.defense)}
-          />
-
-          <StatRow
-            icon={<Sparkles size={11} />}
-            label="Dodge"
-            value={formatPercent(playerStats.dodge)}
-          />
-
-          <StatRow
-            icon={<Flame size={11} />}
-            label="Crit"
-            value={formatPercent(playerStats.crit)}
-          />
-
-          <StatRow
-            icon={<Shield size={11} />}
-            label="Reduction"
-            value={formatPercent(playerStats.damageReduction)}
-          />
-        </div>
-      </div>
-
-      <button
-        onClick={onFight}
-        style={{
-          width: "100%",
-          padding: "14px 0",
-          borderRadius: 5,
-          border: "none",
-          background: COLORS.chrome,
-          color: COLORS.void,
-          fontFamily: FONT_DISPLAY,
-          fontWeight: 800,
-          fontSize: 13,
-          letterSpacing: 0.8,
-          textTransform: "uppercase",
-          cursor: "pointer",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7,
+          alignItems:
+            "center",
+          justifyContent:
+            "center",
+          gap: 6,
+          color:
+            accent,
+          fontFamily:
+            FONT_DISPLAY,
+          fontSize: 10,
+          fontWeight: 800,
+          overflow:
+            "hidden",
+          textOverflow:
+            "ellipsis",
+          whiteSpace:
+            "nowrap",
         }}
       >
-        <Sword size={14} />
-        Fight
-      </button>
+        {icon}
+        {name}
+      </div>
 
       <div
         style={{
-          textAlign: "center",
-          fontFamily: FONT_MONO,
-          fontSize: 8,
-          color: COLORS.textMuted,
-          marginTop: 8,
+          marginTop: 10,
+          height: 7,
+          borderRadius: 4,
+          background:
+            COLORS.void,
+          overflow:
+            "hidden",
         }}
       >
-        No undo. See what happens.
+        <motion.div
+          animate={{
+            width:
+              `${hpPct * 100}%`,
+          }}
+          style={{
+            height: "100%",
+            background:
+              accent,
+          }}
+        />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent:
+            "space-between",
+          marginTop: 4,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 8,
+          color:
+            COLORS.textMuted,
+        }}
+      >
+        <span>
+          HP{" "}
+          {formatNumber(
+            hp,
+          )}
+        </span>
+
+        <span>
+          ATK{" "}
+          {formatNumber(
+            attack,
+          )}
+        </span>
       </div>
     </div>
   );
@@ -2282,322 +2806,221 @@ function BattlePreview({
 // ============================================================================
 
 function ResultScreen({
-  round,
-  result,
-  enemy,
   checkpoint,
-  onNext,
-  onRetry,
-  onMenu,
+  battle,
+  enemy,
+  bestCheckpoint,
+  onRestart,
+  onExit,
 }: {
-  round: number;
-  result: ReturnType<typeof simulateBattle>;
-  enemy: Enemy;
   checkpoint: number;
-  onNext: () => void;
-  onRetry: () => void;
-  onMenu: () => void;
+  battle: BattleResult;
+  enemy: Enemy;
+  bestCheckpoint: number;
+  onRestart: () => void;
+  onExit: () => void;
 }) {
-  const won = result.playerWon;
+  const won =
+    battle.winner ===
+    "player";
 
   return (
-    <div>
-      <div
+    <div
+      style={{
+        textAlign:
+          "center",
+      }}
+    >
+      <motion.div
+        initial={{
+          scale: 0.5,
+          rotate: -10,
+        }}
+        animate={{
+          scale: 1,
+          rotate: 0,
+        }}
+        transition={{
+          type: "spring",
+        }}
         style={{
-          textAlign: "center",
-          padding: "15px 0 13px",
+          width: 70,
+          height: 70,
+          margin:
+            "5px auto 14px",
+          borderRadius:
+            "50%",
+          display: "flex",
+          alignItems:
+            "center",
+          justifyContent:
+            "center",
+          background:
+            won
+              ? `${COLORS.chrome}18`
+              : "#ff6b6b18",
+          border:
+            `1px solid ${
+              won
+                ? COLORS.chrome
+                : "#ff6b6b"
+            }55`,
         }}
       >
-        <motion.div
-          initial={{ scale: 0.5, rotate: -20 }}
-          animate={{ scale: 1, rotate: 0 }}
-        >
-          {won ? (
-            <Trophy
-              size={32}
-              color={COLORS.chrome}
-              style={{ margin: "0 auto" }}
-            />
-          ) : (
-            <Skull
-              size={32}
-              color={COLORS.textMuted}
-              style={{ margin: "0 auto" }}
-            />
-          )}
-        </motion.div>
+        {won ? (
+          <Trophy
+            size={31}
+            color={
+              COLORS.chrome
+            }
+          />
+        ) : (
+          <Skull
+            size={31}
+            color="#ff6b6b"
+          />
+        )}
+      </motion.div>
 
-        <div
-          style={{
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 800,
-            fontSize: 20,
-            color: COLORS.text,
-            marginTop: 8,
-          }}
-        >
-          {won ? "YOU WON" : "YOU LOST"}
-        </div>
-
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 9,
-            color: COLORS.textMuted,
-            marginTop: 3,
-          }}
-        >
-          Round {round} · {result.turns} turns
-        </div>
+      <div
+        style={{
+          fontFamily:
+            FONT_DISPLAY,
+          fontSize: 24,
+          fontWeight: 900,
+          color:
+            COLORS.text,
+        }}
+      >
+        {won
+          ? "YOU WON"
+          : "BUILD DESTROYED"}
       </div>
 
-      {/* FINAL HP */}
+      <div
+        style={{
+          marginTop: 5,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 10,
+          color:
+            COLORS.textMuted,
+        }}
+      >
+        {won
+          ? `Checkpoint ${checkpoint} cleared`
+          : `${enemy.name} ended the run`}
+      </div>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          gridTemplateColumns:
+            "1fr 1fr",
           gap: 8,
-          marginBottom: 10,
+          marginTop: 18,
         }}
       >
-        <ResultStat
-          label="Your HP"
-          value={formatNumber(result.player.hp)}
-          sub={`/${formatNumber(result.player.maxHp)}`}
+        <MiniStat
+          icon={
+            <Target size={14} />
+          }
+          label="CHECKPOINT"
+          value={String(
+            checkpoint,
+          )}
         />
 
-        <ResultStat
-          label="Enemy HP"
-          value={formatNumber(result.enemy.hp)}
-          sub={`/${formatNumber(result.enemy.maxHp)}`}
+        <MiniStat
+          icon={
+            <Trophy size={14} />
+          }
+          label="BEST"
+          value={String(
+            bestCheckpoint,
+          )}
         />
       </div>
-
-      {/* BATTLE LOG */}
 
       <div
         style={{
-          padding: "10px",
-          borderRadius: 6,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 10,
+          marginTop: 12,
+          padding:
+            "13px 14px",
+          borderRadius: 7,
+          background:
+            COLORS.panel,
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 9.5,
+          lineHeight: 1.6,
+          color:
+            COLORS.textMuted,
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            marginBottom: 7,
-          }}
-        >
-          <Eye size={11} />
-          What happened
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 4,
-          }}
-        >
-          {result.logs.map((log, index) => (
-            <div
-              key={index}
-              style={{
-                display: "flex",
-                gap: 7,
-                alignItems: "center",
-                fontFamily: FONT_MONO,
-                fontSize: 8.5,
-                color:
-                  log.attacker === "player"
-                    ? COLORS.text
-                    : COLORS.textMuted,
-              }}
-            >
-              <span
-                style={{
-                  width: 5,
-                  height: 5,
-                  borderRadius: "50%",
-                  background:
-                    log.attacker === "player"
-                      ? COLORS.chrome
-                      : COLORS.textMuted,
-                  flexShrink: 0,
-                }}
-              />
-
-              <span style={{ flex: 1 }}>{log.text}</span>
-
-              {log.damage && (
-                <span
-                  style={{
-                    color: log.critical
-                      ? COLORS.chrome
-                      : COLORS.textMuted,
-                    fontWeight: log.critical ? 800 : 400,
-                  }}
-                >
-                  -{formatNumber(log.damage)}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
+        The next run will generate
+        a completely different
+        combination of enemies and
+        choices.
       </div>
 
-      {/* ENEMY REVEAL */}
-
-      <div
+      <button
+        onClick={onRestart}
         style={{
-          padding: "11px 12px",
+          width: "100%",
+          marginTop: 12,
+          padding:
+            "13px 10px",
+          border: "none",
           borderRadius: 6,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
+          background:
+            COLORS.chrome,
+          color:
+            COLORS.void,
+          fontFamily:
+            FONT_DISPLAY,
+          fontSize: 12,
+          fontWeight: 800,
+          cursor:
+            "pointer",
         }}
       >
-        <div
+        <RefreshCw
+          size={14}
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
+            verticalAlign:
+              "middle",
+            marginRight: 6,
           }}
-        >
-          <div>
-            <div
-              style={{
-                fontFamily: FONT_DISPLAY,
-                fontWeight: 700,
-                fontSize: 12,
-                color: COLORS.text,
-              }}
-            >
-              {enemy.name}
-            </div>
+        />
+        TRY A NEW BUILD
+      </button>
 
-            <div
-              style={{
-                fontFamily: FONT_MONO,
-                fontSize: 8,
-                color: COLORS.textMuted,
-                marginTop: 2,
-              }}
-            >
-              Enemy build revealed
-            </div>
-          </div>
-
-          <Eye size={14} color={COLORS.chrome} />
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 4,
-            marginTop: 8,
-          }}
-        >
-          {enemy.cards.map((card, index) => (
-            <span
-              key={`${card.id}-${index}`}
-              style={{
-                padding: "4px 6px",
-                borderRadius: 3,
-                background: `${COLORS.chrome}10`,
-                border: `1px solid ${COLORS.panelLine}`,
-                fontFamily: FONT_MONO,
-                fontSize: 7.5,
-                color: COLORS.textMuted,
-              }}
-            >
-              {card.icon} {card.name}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {won ? (
-        <button
-          onClick={onNext}
-          style={{
-            width: "100%",
-            padding: "13px 0",
-            borderRadius: 5,
-            border: "none",
-            background: COLORS.chrome,
-            color: COLORS.void,
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 800,
-            fontSize: 12,
-            letterSpacing: 0.7,
-            textTransform: "uppercase",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-          }}
-        >
-          <ChevronRight size={15} />
-          See what&apos;s next
-        </button>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-          <button
-            onClick={onRetry}
-            style={{
-              width: "100%",
-              padding: "13px 0",
-              borderRadius: 5,
-              border: "none",
-              background: COLORS.chrome,
-              color: COLORS.void,
-              fontFamily: FONT_DISPLAY,
-              fontWeight: 800,
-              fontSize: 12,
-              letterSpacing: 0.7,
-              textTransform: "uppercase",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-            }}
-          >
-            <RefreshCw size={14} />
-            Reroll from checkpoint {checkpoint}
-          </button>
-
-          <button
-            onClick={onMenu}
-            style={{
-              width: "100%",
-              padding: "11px 0",
-              borderRadius: 5,
-              border: `1px solid ${COLORS.panelLine}`,
-              background: COLORS.panel,
-              color: COLORS.textMuted,
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              cursor: "pointer",
-            }}
-          >
-            End run
-          </button>
-        </div>
-      )}
+      <button
+        onClick={onExit}
+        style={{
+          width: "100%",
+          marginTop: 7,
+          padding:
+            "11px 10px",
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          borderRadius: 6,
+          background:
+            COLORS.panel,
+          color:
+            COLORS.textMuted,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 10,
+          cursor:
+            "pointer",
+        }}
+      >
+        EXIT
+      </button>
     </div>
   );
 }
@@ -2606,216 +3029,141 @@ function ResultScreen({
 // SMALL COMPONENTS
 // ============================================================================
 
-function StatTile({
-  icon,
+function StatBox({
   label,
   value,
+  percent = false,
 }: {
-  icon: React.ReactNode;
   label: string;
-  value: string;
+  value: number | string;
+  percent?: boolean;
 }) {
   return (
     <div
       style={{
-        padding: "11px 12px",
-        borderRadius: 5,
-        background: COLORS.panel,
-        border: `1px solid ${COLORS.panelLine}`,
+        padding:
+          "7px 6px",
+        borderRadius: 4,
+        background:
+          COLORS.void,
+        border:
+          `1px solid ${COLORS.panelLine}`,
+        textAlign:
+          "center",
       }}
     >
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          color: COLORS.chrome,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 7,
+          color:
+            COLORS.textMuted,
         }}
       >
-        {icon}
-
-        <span
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-            color: COLORS.textMuted,
-            textTransform: "uppercase",
-          }}
-        >
-          {label}
-        </span>
+        {label}
       </div>
 
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 15,
+          marginTop: 2,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 10,
           fontWeight: 700,
-          color: COLORS.text,
-          marginTop: 5,
+          color:
+            COLORS.text,
         }}
       >
-        {value}
+        {typeof value ===
+        "number"
+          ? percent
+            ? formatPercent(
+                value,
+              )
+            : formatNumber(
+                value,
+              )
+          : value}
       </div>
     </div>
+  );
+}
+
+function Badge({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      style={{
+        padding:
+          "3px 5px",
+        borderRadius: 3,
+        background:
+          COLORS.void,
+        border:
+          `1px solid ${COLORS.panelLine}`,
+        fontFamily:
+          FONT_MONO,
+        fontSize: 7,
+        color:
+          COLORS.textMuted,
+      }}
+    >
+      {children}
+    </span>
   );
 }
 
 function MiniStat({
+  icon,
   label,
   value,
 }: {
+  icon: React.ReactNode;
   label: string;
   value: string;
 }) {
   return (
     <div
       style={{
-        padding: "6px",
-        borderRadius: 3,
-        background: COLORS.void,
-        border: `1px solid ${COLORS.panelLine}`,
-        minWidth: 0,
-      }}
-    >
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 7,
-          color: COLORS.textMuted,
-        }}
-      >
-        {label}
-      </div>
-
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 9,
-          color: COLORS.text,
-          fontWeight: 700,
-          marginTop: 2,
-        }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function Combatant({
-  title,
-  hp,
-  attack,
-  defense,
-  icon,
-}: {
-  title: string;
-  hp: number;
-  attack: number;
-  defense: number;
-  icon: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        padding: "10px",
+        padding:
+          "10px 7px",
         borderRadius: 6,
-        background: COLORS.panel,
-        border: `1px solid ${COLORS.panelLine}`,
-        minWidth: 0,
+        background:
+          COLORS.panel,
+        border:
+          `1px solid ${COLORS.panelLine}`,
+        textAlign:
+          "center",
       }}
     >
       <div
         style={{
           display: "flex",
-          alignItems: "center",
-          gap: 5,
-          color: COLORS.chrome,
+          justifyContent:
+            "center",
+          alignItems:
+            "center",
+          gap: 4,
+          color:
+            COLORS.chrome,
         }}
       >
         {icon}
-
-        <span
-          style={{
-            fontFamily: FONT_DISPLAY,
-            fontSize: 9,
-            fontWeight: 700,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {title}
-        </span>
       </div>
 
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 15,
-          fontWeight: 700,
-          color: COLORS.text,
-          marginTop: 6,
-        }}
-      >
-        {formatNumber(hp)}
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
           marginTop: 3,
-          fontFamily: FONT_MONO,
-          fontSize: 7.5,
-          color: COLORS.textMuted,
-        }}
-      >
-        <span>ATK {formatNumber(attack)}</span>
-        <span>DEF {formatNumber(defense)}</span>
-      </div>
-    </div>
-  );
-}
-
-function ResultStat({
-  label,
-  value,
-  sub,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-}) {
-  return (
-    <div
-      style={{
-        padding: "12px",
-        borderRadius: 6,
-        background: COLORS.panel,
-        border: `1px solid ${COLORS.panelLine}`,
-        textAlign: "center",
-      }}
-    >
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 8,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
-        }}
-      >
-        {label}
-      </div>
-
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 17,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 12,
           fontWeight: 700,
-          color: COLORS.text,
-          marginTop: 4,
+          color:
+            COLORS.text,
         }}
       >
         {value}
@@ -2823,13 +3171,15 @@ function ResultStat({
 
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 7.5,
-          color: COLORS.textMuted,
-          marginTop: 1,
+          marginTop: 2,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 7,
+          color:
+            COLORS.textMuted,
         }}
       >
-        {sub}
+        {label}
       </div>
     </div>
   );
