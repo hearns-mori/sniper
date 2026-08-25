@@ -831,10 +831,18 @@ export default function SniperGame() {
         Date.now() -
         active.startTime;
 
-      const kills =
+      var kills =
         calcKills(
           finalElapsed
         );
+
+      if (active.category === "army") {
+        kills = kills;
+      } else if (active.category === "commander") {
+        kills = kills*3;
+      } else if (active.category === "architect") {
+        kills = kills*7;
+      }
 
       const rate =
         calcRate(
