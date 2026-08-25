@@ -3,18 +3,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Activity,
   ArrowLeft,
-  ArrowRight,
-  Brain,
+  ArrowUp,
   Crosshair,
   Dices,
-  Flame,
   Heart,
-  Play,
-  RefreshCw,
+  RotateCcw,
   Shield,
   Skull,
-  Sparkles,
   Swords,
   Target,
   Trophy,
@@ -23,1036 +20,974 @@ import {
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
 
-type Phase = "menu" | "build" | "battle" | "result";
+type Phase = "menu" | "battle";
 
 interface PhaserShooterProps {
   lifetimeKills: number;
   onExit: () => void;
 }
 
-// ============================================================================
-// TYPES
-// ============================================================================
+/* ============================================================================
+   CORE LEVEL SYSTEM
+   ========================================================================== */
+
+/*
+ * 521 productivity kills = 1 game level.
+ *
+ * Level is permanent.
+ * Allocation is freely changeable.
+ * The player gets exactly one stat point per level.
+ */
+interface LevelInfo {
+  level: number;
+  xpIntoLevel: number;
+  xpForNextLevel: number;
+}
+
+function xpForLevel(_level: number): number {
+  return 521;
+}
+
+function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
+  let level = 1;
+  let xp = Math.max(0, Math.floor(lifetimeKills));
+
+  while (xp >= xpForLevel(level)) {
+    xp -= xpForLevel(level);
+    level += 1;
+  }
+
+  return {
+    level,
+    xpIntoLevel: xp,
+    xpForNextLevel: xpForLevel(level),
+  };
+}
+
+/* ============================================================================
+   PLAYER BUILD
+   ========================================================================== */
 
 type StatKey =
-  | "hp"
-  | "attack"
-  | "defense"
-  | "crit"
-  | "dodge"
+  | "vitality"
+  | "power"
+  | "armor"
+  | "agility"
+  | "precision"
+  | "critical"
+  | "evasion"
   | "lifesteal"
-  | "damageReduction"
-  | "damageAmp"
   | "penetration"
-  | "accuracy"
-  | "thorns"
-  | "attackSpeed"
-  | "critDamage"
-  | "execute"
-  | "doubleStrike";
+  | "fortitude"
+  | "regeneration"
+  | "block"
+  | "counter";
+
+interface Allocation {
+  vitality: number;
+  power: number;
+  armor: number;
+  agility: number;
+  precision: number;
+  critical: number;
+  evasion: number;
+  lifesteal: number;
+  penetration: number;
+  fortitude: number;
+  regeneration: number;
+  block: number;
+  counter: number;
+}
+
+const EMPTY_ALLOCATION: Allocation = {
+  vitality: 0,
+  power: 0,
+  armor: 0,
+  agility: 0,
+  precision: 0,
+  critical: 0,
+  evasion: 0,
+  lifesteal: 0,
+  penetration: 0,
+  fortitude: 0,
+  regeneration: 0,
+  block: 0,
+  counter: 0,
+};
 
 interface Stats {
   hp: number;
   maxHp: number;
   attack: number;
   defense: number;
-  crit: number;
-  dodge: number;
-  lifesteal: number;
-  damageReduction: number;
-  damageAmp: number;
-  penetration: number;
+  speed: number;
   accuracy: number;
-  thorns: number;
-  attackSpeed: number;
-  critDamage: number;
-  execute: number;
-  doubleStrike: number;
+  critChance: number;
+  critMultiplier: number;
+  dodgeChance: number;
+  lifesteal: number;
+  penetration: number;
+  damageReduction: number;
+  regeneration: number;
+  blockChance: number;
+  blockAmount: number;
+  counterChance: number;
+  counterDamage: number;
 }
+
+/*
+ * Broad stat system.
+ *
+ * Every allocation has a meaningful identity:
+ *
+ * Vitality      = enormous HP
+ * Power         = attack
+ * Armor         = defense
+ * Agility       = speed + dodge
+ * Precision     = accuracy + penetration
+ * Critical      = crit
+ * Evasion       = dodge
+ * Lifesteal     = sustain
+ * Penetration   = bypass defense / reduction
+ * Fortitude     = damage reduction
+ * Regeneration  = healing
+ * Block         = chance to reduce hits
+ * Counter       = retaliation
+ *
+ * Soft caps prevent one stat from becoming mathematically unbeatable.
+ */
+function buildPlayerStats(allocation: Allocation): Stats {
+  const hp = 100 + allocation.vitality * 28;
+
+  const attack =
+    12 +
+    allocation.power * 6 +
+    Math.floor(Math.pow(allocation.power, 1.08));
+
+  const defense =
+    5 +
+    allocation.armor * 4 +
+    Math.floor(Math.pow(allocation.armor, 1.04));
+
+  const speed = 10 + allocation.agility * 2.2;
+
+  const accuracy = Math.min(
+    98,
+    82 + allocation.precision * 1.2
+  );
+
+  const critChance = Math.min(
+    55,
+    5 + allocation.critical * 1.35
+  );
+
+  const critMultiplier =
+    1.5 + Math.min(1.0, allocation.critical * 0.025);
+
+  const dodgeChance = Math.min(
+    45,
+    allocation.agility * 0.65 + allocation.evasion * 1.35
+  );
+
+  const lifesteal = Math.min(
+    35,
+    allocation.lifesteal * 1.15
+  );
+
+  const penetration = Math.min(
+    70,
+    allocation.precision * 0.8 +
+      allocation.penetration * 1.4
+  );
+
+  const damageReduction = Math.min(
+    55,
+    allocation.fortitude * 1.15
+  );
+
+  const regeneration =
+    allocation.regeneration * 0.7;
+
+  const blockChance = Math.min(
+    50,
+    allocation.block * 1.25
+  );
+
+  const blockAmount = Math.min(
+    65,
+    15 + allocation.block * 0.85
+  );
+
+  const counterChance = Math.min(
+    45,
+    allocation.counter * 1.25
+  );
+
+  const counterDamage =
+    0.25 + Math.min(0.75, allocation.counter * 0.018);
+
+  return {
+    hp,
+    maxHp: hp,
+    attack,
+    defense,
+    speed,
+    accuracy,
+    critChance,
+    critMultiplier,
+    dodgeChance,
+    lifesteal,
+    penetration,
+    damageReduction,
+    regeneration,
+    blockChance,
+    blockAmount,
+    counterChance,
+    counterDamage,
+  };
+}
+
+/* ============================================================================
+   ENEMY SYSTEM
+   ========================================================================== */
 
 interface Enemy {
   id: number;
   name: string;
-  title: string;
-  stats: Stats;
   level: number;
-  rarity: "common" | "elite" | "boss";
+  hp: number;
+  maxHp: number;
+  attack: number;
+  defense: number;
+  speed: number;
+  accuracy: number;
+  critChance: number;
+  critMultiplier: number;
+  dodgeChance: number;
+  lifesteal: number;
+  penetration: number;
+  damageReduction: number;
+  regeneration: number;
+  blockChance: number;
+  blockAmount: number;
+  counterChance: number;
+  counterDamage: number;
+  archetype: string;
 }
 
-interface UpgradeCard {
-  id: string;
-  name: string;
-  description: string;
-  rarity: "common" | "rare" | "epic" | "legendary";
-  apply: (stats: Stats) => Stats;
-  tag: string;
-}
-
-interface BattleLog {
-  id: number;
-  text: string;
-  type: "player" | "enemy" | "critical" | "system";
-}
-
-// ============================================================================
-// STORAGE
-// ============================================================================
-
-const STORAGE_KEY = "phaserShooter_build_v2";
-
-interface SavedState {
-  bestCheckpoint: number;
-  totalWins: number;
-  totalRuns: number;
-}
-
-function loadSavedState(): SavedState {
-  if (typeof window === "undefined") {
-    return {
-      bestCheckpoint: 0,
-      totalWins: 0,
-      totalRuns: 0,
-    };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) {
-      return {
-        bestCheckpoint: 0,
-        totalWins: 0,
-        totalRuns: 0,
-      };
-    }
-
-    const parsed = JSON.parse(raw) as Partial<SavedState>;
-
-    return {
-      bestCheckpoint: Math.max(0, Number(parsed.bestCheckpoint) || 0),
-      totalWins: Math.max(0, Number(parsed.totalWins) || 0),
-      totalRuns: Math.max(0, Number(parsed.totalRuns) || 0),
-    };
-  } catch {
-    return {
-      bestCheckpoint: 0,
-      totalWins: 0,
-      totalRuns: 0,
-    };
-  }
-}
-
-function saveState(state: SavedState) {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Ignore localStorage errors.
-  }
-}
-
-// ============================================================================
-// RANDOM
-// ============================================================================
-
-let randomId = 0;
-
-function uid(prefix = "id") {
-  randomId += 1;
-  return `${prefix}-${Date.now()}-${randomId}`;
-}
-
-function randomFloat(min: number, max: number) {
-  return Math.random() * (max - min) + min;
-}
-
-function randomInt(min: number, max: number) {
-  return Math.floor(randomFloat(min, max + 1));
-}
-
-function pick<T>(items: T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
-}
-
-function shuffle<T>(items: T[]): T[] {
-  const result = [...items];
-
-  for (let i = result.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-
-  return result;
-}
-
-// ============================================================================
-// LEVEL SYSTEM
-// ============================================================================
-
-interface LevelInfo {
-  level: number;
-  xpIntoLevel: number;
-  xpForNextLevel: number;
-  multiplier: number;
-}
-
-function xpForLevel(level: number) {
-  return Math.max(521, Math.floor(521 * Math.pow(1.08, level - 1)));
-}
-
-function levelFromLifetimeKills(kills: number): LevelInfo {
-  let remaining = Math.max(0, Math.floor(kills));
-  let level = 1;
-
-  while (remaining >= xpForLevel(level)) {
-    remaining -= xpForLevel(level);
-    level += 1;
-  }
-
-  return {
-    level,
-    xpIntoLevel: remaining,
-    xpForNextLevel: xpForLevel(level),
-    multiplier: Math.pow(level, 1.521),
-  };
-}
-
-// ============================================================================
-// BASE STATS
-// ============================================================================
-
-function createBaseStats(levelInfo: LevelInfo): Stats {
-  const l = levelInfo.level;
-  const m = levelInfo.multiplier;
-
-  return {
-    hp: Math.round(100 + l * 18 * m),
-    maxHp: Math.round(100 + l * 18 * m),
-    attack: Math.round(15 + l * 5 * m),
-    defense: Math.round(5 + l * 2.2 * m),
-    crit: 5,
-    dodge: 5,
-    lifesteal: 0,
-    damageReduction: 0,
-    damageAmp: 0,
-    penetration: 0,
-    accuracy: 90,
-    thorns: 0,
-    attackSpeed: 1,
-    critDamage: 150,
-    execute: 0,
-    doubleStrike: 0,
-  };
-}
-
-function cloneStats(stats: Stats): Stats {
-  return { ...stats };
-}
-
-function clampStats(stats: Stats): Stats {
-  return {
-    ...stats,
-    hp: Math.max(1, stats.hp),
-    maxHp: Math.max(1, stats.maxHp),
-    attack: Math.max(1, stats.attack),
-    defense: Math.max(0, stats.defense),
-    crit: Math.min(100, Math.max(0, stats.crit)),
-    dodge: Math.min(75, Math.max(0, stats.dodge)),
-    lifesteal: Math.min(100, Math.max(0, stats.lifesteal)),
-    damageReduction: Math.min(80, Math.max(0, stats.damageReduction)),
-    damageAmp: Math.max(0, stats.damageAmp),
-    penetration: Math.min(100, Math.max(0, stats.penetration)),
-    accuracy: Math.min(100, Math.max(1, stats.accuracy)),
-    thorns: Math.max(0, stats.thorns),
-    attackSpeed: Math.max(0.25, stats.attackSpeed),
-    critDamage: Math.max(100, stats.critDamage),
-    execute: Math.min(100, Math.max(0, stats.execute)),
-    doubleStrike: Math.min(75, Math.max(0, stats.doubleStrike)),
-  };
-}
-
-// ============================================================================
-// ENEMIES
-// ============================================================================
+let enemyId = 1;
 
 const ENEMY_NAMES = [
-  "The Unknown",
-  "Iron Fang",
-  "Glass Cannon",
-  "Void Walker",
-  "Blood Hunter",
-  "The Gambler",
-  "Nightmare",
-  "Stone Giant",
-  "Executioner",
-  "Mirror Knight",
-  "Chaos Beast",
-  "The Collector",
+  "Iron Revenant",
+  "Void Hunter",
+  "Glass Predator",
+  "Ash Knight",
+  "Blood Warden",
+  "Storm Stalker",
+  "Bone Titan",
+  "Night Fang",
+  "Rift Soldier",
   "Crimson Machine",
-  "Phantom",
-  "Overlord",
+  "Silent Executioner",
+  "Obsidian Beast",
+  "Feral Construct",
+  "Dread Vanguard",
+  "Chaos Runner",
 ];
 
-const ENEMY_TITLES = [
-  "Unpredictable",
-  "Relentless",
-  "Adapted",
-  "Cursed",
-  "Ancient",
-  "Experimental",
-  "Awakened",
-  "Ruthless",
-  "Unknown",
+const ARCHETYPES = [
+  "Tank",
+  "Berserker",
+  "Assassin",
+  "Vampire",
+  "Guardian",
+  "Marksman",
+  "Juggernaut",
+  "Balanced",
 ];
 
-function createEnemy(
-  checkpoint: number,
-  levelInfo: LevelInfo,
-): Enemy {
-  const difficulty = Math.pow(1.105, checkpoint);
-  const levelScale = Math.pow(levelInfo.level, 0.72);
+function seededRandom(seed: number): () => number {
+  let s = Math.abs(Math.floor(seed)) || 1;
 
-  const baseHp =
-    (115 + levelInfo.level * 14) *
-    difficulty *
-    levelScale;
-
-  const baseAttack =
-    (13 + levelInfo.level * 4) *
-    difficulty *
-    Math.pow(levelScale, 0.65);
-
-  const style = randomInt(0, 7);
-
-  const stats: Stats = {
-    hp: baseHp,
-    maxHp: baseHp,
-    attack: baseAttack,
-    defense: 5 * difficulty,
-    crit: 5,
-    dodge: 5,
-    lifesteal: 0,
-    damageReduction: 0,
-    damageAmp: 0,
-    penetration: 0,
-    accuracy: 90,
-    thorns: 0,
-    attackSpeed: 1,
-    critDamage: 150,
-    execute: 0,
-    doubleStrike: 0,
+  return () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
   };
+}
 
-  // Every enemy gets a different archetype.
-  switch (style) {
-    case 0:
-      stats.attack *= 1.65;
-      stats.hp *= 0.72;
-      stats.crit += 20;
-      stats.critDamage += 35;
+function generateEnemy(depth: number, playerLevel: number): Enemy {
+  /*
+   * A deterministic seed based on depth + current time.
+   *
+   * This means every new enemy is different while the combat itself
+   * remains reproducible during one fight.
+   */
+  const seed =
+    Date.now() +
+    depth * 7919 +
+    playerLevel * 104729 +
+    Math.floor(Math.random() * 999999);
+
+  const random = seededRandom(seed);
+
+  const archetype =
+    ARCHETYPES[Math.floor(random() * ARCHETYPES.length)];
+
+  const name =
+    ENEMY_NAMES[Math.floor(random() * ENEMY_NAMES.length)];
+
+  /*
+   * Enemy power rises with depth, but not linearly.
+   *
+   * This creates increasing danger without requiring absurd numbers.
+   */
+  const difficulty =
+    1 +
+    depth * 0.095 +
+    Math.pow(depth, 1.18) * 0.018;
+
+  const variance = 0.82 + random() * 0.36;
+
+  let hp = 120 * difficulty * variance;
+  let attack = 13 * difficulty * variance;
+  let defense = 6 * difficulty * variance;
+  let speed = 10 * (0.9 + random() * 0.25);
+  let accuracy = 82;
+  let critChance = 5;
+  let critMultiplier = 1.5;
+  let dodgeChance = 3;
+  let lifesteal = 0;
+  let penetration = 0;
+  let damageReduction = 0;
+  let regeneration = 0;
+  let blockChance = 0;
+  let blockAmount = 20;
+  let counterChance = 0;
+  let counterDamage = 0.35;
+
+  switch (archetype) {
+    case "Tank":
+      hp *= 1.7;
+      defense *= 1.55;
+      attack *= 0.78;
+      speed *= 0.75;
+      damageReduction = 12 + random() * 12;
+      blockChance = 12 + random() * 10;
+      blockAmount = 35;
       break;
 
-    case 1:
-      stats.hp *= 1.85;
-      stats.defense *= 1.55;
-      stats.attack *= 0.72;
-      stats.damageReduction += 15;
+    case "Berserker":
+      hp *= 0.85;
+      attack *= 1.65;
+      defense *= 0.7;
+      critChance = 15 + random() * 12;
+      critMultiplier = 1.8;
+      damageReduction = 3;
       break;
 
-    case 2:
-      stats.dodge += 30;
-      stats.accuracy += 5;
-      stats.attack *= 0.92;
+    case "Assassin":
+      hp *= 0.7;
+      attack *= 1.35;
+      speed *= 1.8;
+      critChance = 20 + random() * 15;
+      critMultiplier = 1.9;
+      dodgeChance = 18 + random() * 10;
+      accuracy = 88;
       break;
 
-    case 3:
-      stats.attack *= 1.25;
-      stats.lifesteal += 25;
-      stats.thorns += baseAttack * 0.15;
+    case "Vampire":
+      hp *= 0.95;
+      attack *= 1.05;
+      lifesteal = 18 + random() * 15;
+      regeneration = 0.5 + random() * 1.2;
       break;
 
-    case 4:
-      stats.penetration += 45;
-      stats.damageAmp += 35;
-      stats.defense *= 0.7;
+    case "Guardian":
+      hp *= 1.35;
+      defense *= 1.25;
+      attack *= 0.9;
+      blockChance = 25 + random() * 12;
+      blockAmount = 45;
+      counterChance = 12;
       break;
 
-    case 5:
-      stats.doubleStrike += 30;
-      stats.attack *= 0.82;
-      stats.attackSpeed = 1.4;
+    case "Marksman":
+      hp *= 0.8;
+      attack *= 1.25;
+      accuracy = 94;
+      penetration = 15 + random() * 15;
+      critChance = 12 + random() * 8;
       break;
 
-    case 6:
-      stats.damageReduction += 25;
-      stats.dodge += 10;
-      stats.attack *= 0.78;
+    case "Juggernaut":
+      hp *= 2;
+      defense *= 1.2;
+      attack *= 1.15;
+      speed *= 0.65;
+      damageReduction = 20 + random() * 10;
       break;
 
+    case "Balanced":
     default:
-      stats.hp *= 1.15;
-      stats.attack *= 1.15;
-      stats.crit += 10;
-      stats.dodge += 8;
-      stats.lifesteal += 10;
-      stats.penetration += 10;
+      hp *= 1.05;
+      attack *= 1.05;
+      defense *= 1.05;
       break;
   }
 
-  // Random mutations make identical checkpoint enemies unlikely.
-  stats.hp *= randomFloat(0.82, 1.22);
-  stats.attack *= randomFloat(0.84, 1.18);
-  stats.defense *= randomFloat(0.8, 1.2);
-  stats.crit += randomFloat(-4, 8);
-  stats.dodge += randomFloat(-3, 8);
-
-  const rarityRoll = Math.random();
-
-  let rarity: Enemy["rarity"] = "common";
-
-  if (checkpoint > 0 && rarityRoll > 0.9) {
-    rarity = "boss";
-  } else if (rarityRoll > 0.68) {
-    rarity = "elite";
-  }
-
-  if (rarity === "elite") {
-    stats.hp *= 1.25;
-    stats.attack *= 1.18;
-    stats.defense *= 1.15;
-  }
-
-  if (rarity === "boss") {
-    stats.hp *= 1.75;
-    stats.attack *= 1.4;
-    stats.defense *= 1.3;
-  }
-
-  stats.maxHp = stats.hp;
-
   return {
-    id: randomInt(1, 999999999),
-    name: pick(ENEMY_NAMES),
-    title: pick(ENEMY_TITLES),
-    stats: clampStats(stats),
-    level: Math.max(1, levelInfo.level + Math.floor(checkpoint * 0.65)),
-    rarity,
-  };
-}
-
-// ============================================================================
-// UPGRADE CARDS
-// ============================================================================
-
-function card(
-  id: string,
-  name: string,
-  description: string,
-  rarity: UpgradeCard["rarity"],
-  tag: string,
-  apply: (stats: Stats) => Stats,
-): UpgradeCard {
-  return {
-    id,
+    id: enemyId++,
     name,
-    description,
-    rarity,
-    tag,
-    apply,
+    level: Math.max(1, playerLevel + Math.floor(depth * 0.4)),
+    hp: Math.round(hp),
+    maxHp: Math.round(hp),
+    attack: Math.round(attack * 10) / 10,
+    defense: Math.round(defense * 10) / 10,
+    speed: Math.round(speed * 10) / 10,
+    accuracy,
+    critChance,
+    critMultiplier,
+    dodgeChance,
+    lifesteal,
+    penetration,
+    damageReduction,
+    regeneration,
+    blockChance,
+    blockAmount,
+    counterChance,
+    counterDamage,
+    archetype,
   };
 }
 
-function createCardPool(): UpgradeCard[] {
-  return [
-    card(
-      "attack25",
-      "+25% Attack",
-      "Increase final attack by 25%.",
-      "common",
-      "OFFENSE",
-      (s) => ({ ...s, attack: s.attack * 1.25 }),
-    ),
+/* ============================================================================
+   COMBAT
+   ========================================================================== */
 
-    card(
-      "attack50",
-      "+50% Attack",
-      "Massively increase attack.",
-      "rare",
-      "OFFENSE",
-      (s) => ({ ...s, attack: s.attack * 1.5 }),
-    ),
-
-    card(
-      "attack100",
-      "+100 Attack",
-      "Add 100 flat attack.",
-      "common",
-      "OFFENSE",
-      (s) => ({ ...s, attack: s.attack + 100 }),
-    ),
-
-    card(
-      "doubleAttack",
-      "×2 Attack",
-      "Double your current attack.",
-      "legendary",
-      "OFFENSE",
-      (s) => ({ ...s, attack: s.attack * 2 }),
-    ),
-
-    card(
-      "damageAmp25",
-      "+25% Final Damage",
-      "Deal 25% more final damage.",
-      "common",
-      "DAMAGE",
-      (s) => ({ ...s, damageAmp: s.damageAmp + 25 }),
-    ),
-
-    card(
-      "damageAmp50",
-      "+50% Final Damage",
-      "Deal 50% more final damage.",
-      "rare",
-      "DAMAGE",
-      (s) => ({ ...s, damageAmp: s.damageAmp + 50 }),
-    ),
-
-    card(
-      "ignoreDefense",
-      "+35% Penetration",
-      "Ignore 35% of enemy defense.",
-      "rare",
-      "DAMAGE",
-      (s) => ({ ...s, penetration: s.penetration + 35 }),
-    ),
-
-    card(
-      "ignoreDefenseHuge",
-      "Ignore 75% Defense",
-      "Massively penetrate enemy defense.",
-      "legendary",
-      "DAMAGE",
-      (s) => ({ ...s, penetration: s.penetration + 75 }),
-    ),
-
-    card(
-      "crit25",
-      "+25% Critical",
-      "Gain 25 percentage points of critical chance.",
-      "rare",
-      "CRIT",
-      (s) => ({ ...s, crit: s.crit + 25 }),
-    ),
-
-    card(
-      "critDamage",
-      "+100% Critical Damage",
-      "Critical hits deal 100% additional damage.",
-      "epic",
-      "CRIT",
-      (s) => ({ ...s, critDamage: s.critDamage + 100 }),
-    ),
-
-    card(
-      "dodge25",
-      "+25% Dodge",
-      "25% chance to completely avoid an attack.",
-      "rare",
-      "DEFENSE",
-      (s) => ({ ...s, dodge: s.dodge + 25 }),
-    ),
-
-    card(
-      "dodge50",
-      "+50% Dodge",
-      "Huge chance to avoid attacks.",
-      "legendary",
-      "DEFENSE",
-      (s) => ({ ...s, dodge: s.dodge + 50 }),
-    ),
-
-    card(
-      "reduction25",
-      "+25% Damage Reduction",
-      "Take 25% less incoming damage.",
-      "rare",
-      "DEFENSE",
-      (s) => ({ ...s, damageReduction: s.damageReduction + 25 }),
-    ),
-
-    card(
-      "reduction50",
-      "+50% Damage Reduction",
-      "Take dramatically less incoming damage.",
-      "epic",
-      "DEFENSE",
-      (s) => ({ ...s, damageReduction: s.damageReduction + 50 }),
-    ),
-
-    card(
-      "hp50",
-      "+50% Maximum HP",
-      "Multiply your maximum health by 50%.",
-      "common",
-      "SURVIVAL",
-      (s) => {
-        const factor = 1.5;
-
-        return {
-          ...s,
-          maxHp: s.maxHp * factor,
-          hp: s.hp * factor,
-        };
-      },
-    ),
-
-    card(
-      "hp100",
-      "×2 Maximum HP",
-      "Double your maximum health.",
-      "legendary",
-      "SURVIVAL",
-      (s) => ({
-        ...s,
-        maxHp: s.maxHp * 2,
-        hp: s.hp * 2,
-      }),
-    ),
-
-    card(
-      "lifesteal25",
-      "+25% Lifesteal",
-      "Recover 25% of damage dealt as HP.",
-      "rare",
-      "SUSTAIN",
-      (s) => ({ ...s, lifesteal: s.lifesteal + 25 }),
-    ),
-
-    card(
-      "lifesteal50",
-      "+50% Lifesteal",
-      "Recover half of damage dealt.",
-      "epic",
-      "SUSTAIN",
-      (s) => ({ ...s, lifesteal: s.lifesteal + 50 }),
-    ),
-
-    card(
-      "defense50",
-      "+50 Defense",
-      "Add 50 defense.",
-      "common",
-      "DEFENSE",
-      (s) => ({ ...s, defense: s.defense + 50 }),
-    ),
-
-    card(
-      "defense100",
-      "+100 Defense",
-      "Add 100 defense.",
-      "rare",
-      "DEFENSE",
-      (s) => ({ ...s, defense: s.defense + 100 }),
-    ),
-
-    card(
-      "accuracy",
-      "+15% Accuracy",
-      "Reduce the enemy's ability to evade your attacks.",
-      "common",
-      "PRECISION",
-      (s) => ({ ...s, accuracy: s.accuracy + 15 }),
-    ),
-
-    card(
-      "thorns",
-      "+50 Thorns",
-      "Reflect 50 damage whenever attacked.",
-      "common",
-      "REFLECT",
-      (s) => ({ ...s, thorns: s.thorns + 50 }),
-    ),
-
-    card(
-      "thornsPercent",
-      "+20% Thorns",
-      "Reflect 20% of incoming damage.",
-      "epic",
-      "REFLECT",
-      (s) => ({ ...s, thorns: s.thorns + s.attack * 0.2 }),
-    ),
-
-    card(
-      "doubleStrike",
-      "+25% Double Strike",
-      "25% chance to attack twice.",
-      "epic",
-      "SPEED",
-      (s) => ({ ...s, doubleStrike: s.doubleStrike + 25 }),
-    ),
-
-    card(
-      "speed",
-      "+50% Attack Speed",
-      "Attack 50% more often.",
-      "rare",
-      "SPEED",
-      (s) => ({ ...s, attackSpeed: s.attackSpeed * 1.5 }),
-    ),
-
-    card(
-      "execute",
-      "+15% Execute",
-      "Instantly finish enemies below 15% HP.",
-      "epic",
-      "EXECUTE",
-      (s) => ({ ...s, execute: s.execute + 15 }),
-    ),
-
-    card(
-      "berserker",
-      "Berserker",
-      "Gain 75% attack but lose 20% damage reduction.",
-      "epic",
-      "RISK",
-      (s) => ({
-        ...s,
-        attack: s.attack * 1.75,
-        damageReduction: Math.max(0, s.damageReduction - 20),
-      }),
-    ),
-
-    card(
-      "glassCannon",
-      "Glass Cannon",
-      "Double attack, but lose 30% maximum HP.",
-      "legendary",
-      "RISK",
-      (s) => ({
-        ...s,
-        attack: s.attack * 2,
-        maxHp: s.maxHp * 0.7,
-        hp: s.hp * 0.7,
-      }),
-    ),
-
-    card(
-      "fortress",
-      "Fortress",
-      "Double defense and gain 25% damage reduction, but lose 20% attack.",
-      "legendary",
-      "RISK",
-      (s) => ({
-        ...s,
-        defense: s.defense * 2,
-        damageReduction: s.damageReduction + 25,
-        attack: s.attack * 0.8,
-      }),
-    ),
-
-    card(
-      "vampire",
-      "Vampire",
-      "Gain 40% lifesteal and 20% attack.",
-      "epic",
-      "SUSTAIN",
-      (s) => ({
-        ...s,
-        lifesteal: s.lifesteal + 40,
-        attack: s.attack * 1.2,
-      }),
-    ),
-
-    card(
-      "assassin",
-      "Assassin",
-      "Gain 35% crit and 50% critical damage.",
-      "epic",
-      "CRIT",
-      (s) => ({
-        ...s,
-        crit: s.crit + 35,
-        critDamage: s.critDamage + 50,
-      }),
-    ),
-
-    card(
-      "chaos",
-      "???",
-      "Something random happens.",
-      "legendary",
-      "CHAOS",
-      (s) => {
-        const outcomes = [
-          (x: Stats) => ({ ...x, attack: x.attack * 1.8 }),
-          (x: Stats) => ({ ...x, maxHp: x.maxHp * 1.8, hp: x.hp * 1.8 }),
-          (x: Stats) => ({ ...x, dodge: x.dodge + 35 }),
-          (x: Stats) => ({ ...x, crit: x.crit + 40 }),
-          (x: Stats) => ({
-            ...x,
-            damageReduction: x.damageReduction + 30,
-          }),
-          (x: Stats) => ({
-            ...x,
-            penetration: x.penetration + 60,
-          }),
-        ];
-
-        return pick(outcomes)(s);
-      },
-    ),
-  ];
+interface CombatLog {
+  id: number;
+  text: string;
+  type: "player" | "enemy" | "system" | "critical" | "heal";
 }
 
-// ============================================================================
-// CARD DRAW
-// ============================================================================
-
-function drawCards(count = 3): UpgradeCard[] {
-  const pool = createCardPool();
-
-  return shuffle(pool).slice(0, count);
-}
-
-// ============================================================================
-// BATTLE
-// ============================================================================
-
-interface BattleResult {
-  winner: "player" | "enemy";
+interface CombatResult {
+  won: boolean;
   playerHp: number;
   enemyHp: number;
-  logs: BattleLog[];
-  turns: number;
+  log: CombatLog[];
+  rounds: number;
 }
 
 function calculateDamage(
   attacker: Stats,
   defender: Stats,
+  defenderHp: number,
+  random: () => number
 ): {
   damage: number;
   critical: boolean;
   dodged: boolean;
+  blocked: boolean;
+  healed: number;
 } {
-  const accuracyRoll = Math.random() * 100;
-
-  if (accuracyRoll > attacker.accuracy - defender.dodge) {
+  /*
+   * Dodge first.
+   */
+  if (random() * 100 > attacker.accuracy) {
     return {
       damage: 0,
       critical: false,
       dodged: true,
+      blocked: false,
+      healed: 0,
     };
   }
 
-  const critical = Math.random() * 100 < attacker.crit;
+  if (random() * 100 < defender.dodgeChance) {
+    return {
+      damage: 0,
+      critical: false,
+      dodged: true,
+      blocked: false,
+      healed: 0,
+    };
+  }
 
-  const defenseAfterPen =
+  /*
+   * Defense is reduced by penetration.
+   *
+   * This makes penetration useful without making defense irrelevant.
+   */
+  const effectiveDefense =
     defender.defense *
-    Math.max(0, 1 - attacker.penetration / 100);
+    (1 - Math.min(0.85, attacker.penetration / 100));
 
+  /*
+   * Defense follows diminishing returns.
+   */
   const defenseMultiplier =
-    100 / (100 + Math.max(0, defenseAfterPen));
+    100 / (100 + Math.max(0, effectiveDefense));
 
-  let damage =
-    attacker.attack *
-    defenseMultiplier;
+  let damage = attacker.attack * defenseMultiplier;
 
-  damage *= 1 + attacker.damageAmp / 100;
+  const critical =
+    random() * 100 < attacker.critChance;
 
   if (critical) {
-    damage *= attacker.critDamage / 100;
+    damage *= attacker.critMultiplier;
   }
 
-  damage *= randomFloat(0.88, 1.12);
+  /*
+   * Final damage reduction happens after armor.
+   */
+  damage *=
+    1 - Math.min(0.8, defender.damageReduction / 100);
+
+  /*
+   * Block is multiplicative rather than absolute.
+   */
+  const blocked =
+    random() * 100 < defender.blockChance;
+
+  if (blocked) {
+    damage *=
+      1 - Math.min(0.8, defender.blockAmount / 100);
+  }
+
+  damage = Math.max(1, damage);
+
+  const healed =
+    damage * (attacker.lifesteal / 100);
 
   return {
-    damage: Math.max(1, damage),
+    damage,
     critical,
     dodged: false,
+    blocked,
+    healed: Math.min(healed, attacker.maxHp - defenderHp),
   };
 }
 
-function runBattle(
-  originalPlayer: Stats,
-  originalEnemy: Stats,
-): BattleResult {
-  const player = cloneStats(originalPlayer);
-  const enemy = cloneStats(originalEnemy);
+function fight(
+  player: Stats,
+  enemy: Enemy,
+  seed: number
+): CombatResult {
+  const random = seededRandom(seed);
 
-  const logs: BattleLog[] = [];
-  let playerHp = player.hp;
-  let enemyHp = enemy.hp;
+  let playerHp = player.maxHp;
+  let enemyHp = enemy.maxHp;
 
-  let turns = 0;
+  const log: CombatLog[] = [];
+  let logId = 1;
+  let rounds = 0;
 
-  const addLog = (
-    text: string,
-    type: BattleLog["type"],
-  ) => {
-    logs.push({
-      id: logs.length,
-      text,
-      type,
-    });
-  };
+  /*
+   * Hard safety cap.
+   *
+   * A properly balanced battle should end long before this.
+   */
+  while (
+    playerHp > 0 &&
+    enemyHp > 0 &&
+    rounds < 250
+  ) {
+    rounds += 1;
 
-  while (playerHp > 0 && enemyHp > 0 && turns < 100) {
-    turns += 1;
+    const playerFirst =
+      player.speed >= enemy.speed
+        ? random() > 0.15
+        : random() < 0.15;
 
-    // Player attacks.
-    const playerHit = calculateDamage(player, enemy);
+    const turns = playerFirst
+      ? ["player", "enemy"]
+      : ["enemy", "player"];
 
-    if (playerHit.dodged) {
-      addLog("Enemy dodged your attack.", "enemy");
-    } else {
-      let damage = playerHit.damage;
+    for (const turn of turns) {
+      if (playerHp <= 0 || enemyHp <= 0) break;
 
-      damage *= Math.max(
-        0.2,
-        1 - enemy.damageReduction / 100,
-      );
-
-      damage = Math.max(1, damage);
-
-      enemyHp -= damage;
-
-      if (playerHit.critical) {
-        addLog(
-          `CRITICAL! You dealt ${Math.round(damage)} damage.`,
-          "critical",
+      if (turn === "player") {
+        const result = calculateDamage(
+          player,
+          enemy,
+          enemyHp,
+          random
         );
-      } else {
-        addLog(
-          `You dealt ${Math.round(damage)} damage.`,
-          "player",
-        );
-      }
 
-      if (player.lifesteal > 0) {
-        const healing =
-          damage * (player.lifesteal / 100);
-
-        playerHp = Math.min(
-          player.maxHp,
-          playerHp + healing,
-        );
-      }
-
-      if (
-        enemyHp <=
-        enemy.maxHp * (player.execute / 100)
-      ) {
-        enemyHp = 0;
-
-        addLog(
-          "EXECUTED. The enemy could not survive.",
-          "critical",
-        );
-      }
-    }
-
-    if (enemyHp <= 0) break;
-
-    // Double strike.
-    if (Math.random() * 100 < player.doubleStrike) {
-      const second = calculateDamage(player, enemy);
-
-      if (!second.dodged) {
-        let damage =
-          second.damage *
-          Math.max(
-            0.2,
-            1 - enemy.damageReduction / 100,
+        if (result.dodged) {
+          log.push({
+            id: logId++,
+            text: "Your attack missed.",
+            type: "system",
+          });
+        } else {
+          enemyHp = Math.max(
+            0,
+            enemyHp - result.damage
           );
 
-        damage = Math.max(1, damage);
+          playerHp = Math.min(
+            player.maxHp,
+            playerHp + result.healed
+          );
 
-        enemyHp -= damage;
+          log.push({
+            id: logId++,
+            text: result.critical
+              ? `CRITICAL hit for ${Math.round(result.damage)}`
+              : `You dealt ${Math.round(result.damage)} damage`,
+            type: result.critical
+              ? "critical"
+              : "player",
+          });
 
-        addLog(
-          `DOUBLE STRIKE dealt ${Math.round(damage)} damage.`,
-          second.critical ? "critical" : "player",
+          if (result.healed > 0) {
+            log.push({
+              id: logId++,
+              text: `Lifesteal +${Math.round(result.healed)} HP`,
+              type: "heal",
+            });
+          }
+
+          if (result.blocked) {
+            log.push({
+              id: logId++,
+              text: "Enemy blocked part of the hit.",
+              type: "system",
+            });
+          }
+        }
+      } else {
+        const enemyStats: Stats = {
+          hp: enemy.hp,
+          maxHp: enemy.maxHp,
+          attack: enemy.attack,
+          defense: enemy.defense,
+          speed: enemy.speed,
+          accuracy: enemy.accuracy,
+          critChance: enemy.critChance,
+          critMultiplier: enemy.critMultiplier,
+          dodgeChance: enemy.dodgeChance,
+          lifesteal: enemy.lifesteal,
+          penetration: enemy.penetration,
+          damageReduction: enemy.damageReduction,
+          regeneration: enemy.regeneration,
+          blockChance: enemy.blockChance,
+          blockAmount: enemy.blockAmount,
+          counterChance: enemy.counterChance,
+          counterDamage: enemy.counterDamage,
+        };
+
+        const result = calculateDamage(
+          enemyStats,
+          player,
+          playerHp,
+          random
         );
+
+        if (result.dodged) {
+          log.push({
+            id: logId++,
+            text: "You dodged the enemy attack.",
+            type: "player",
+          });
+        } else {
+          playerHp = Math.max(
+            0,
+            playerHp - result.damage
+          );
+
+          log.push({
+            id: logId++,
+            text: result.critical
+              ? `Enemy CRIT for ${Math.round(result.damage)}`
+              : `Enemy dealt ${Math.round(result.damage)} damage`,
+            type: result.critical
+              ? "critical"
+              : "enemy",
+          });
+
+          if (result.blocked) {
+            log.push({
+              id: logId++,
+              text: "You blocked part of the attack.",
+              type: "system",
+            });
+          }
+
+          /*
+           * Counterattack.
+           */
+          if (
+            playerHp > 0 &&
+            random() * 100 < player.counterChance
+          ) {
+            const counter =
+              enemy.defense *
+                0 +
+              player.attack *
+                player.counterDamage *
+                (1 -
+                  Math.min(
+                    0.7,
+                    enemy.defense /
+                      (enemy.defense + 150)
+                  ));
+
+            const counterDamage =
+              Math.max(1, counter);
+
+            enemyHp = Math.max(
+              0,
+              enemyHp - counterDamage
+            );
+
+            log.push({
+              id: logId++,
+              text: `Counterattack for ${Math.round(counterDamage)}`,
+              type: "critical",
+            });
+          }
+        }
+      }
+
+      if (playerHp <= 0 || enemyHp <= 0) {
+        break;
       }
     }
 
-    if (enemyHp <= 0) break;
+    /*
+     * Regeneration occurs after each round.
+     */
+    if (playerHp > 0) {
+      playerHp = Math.min(
+        player.maxHp,
+        playerHp + player.regeneration
+      );
+    }
 
-    // Enemy attacks.
-    const enemyHit = calculateDamage(enemy, player);
-
-    if (enemyHit.dodged) {
-      addLog("You dodged the enemy attack.", "player");
-    } else {
-      let damage =
-        enemyHit.damage *
-        Math.max(
-          0.2,
-          1 - player.damageReduction / 100,
-        );
-
-      damage = Math.max(1, damage);
-
-      playerHp -= damage;
-
-      if (enemyHit.critical) {
-        addLog(
-          `Enemy CRIT! You lost ${Math.round(damage)} HP.`,
-          "critical",
-        );
-      } else {
-        addLog(
-          `Enemy dealt ${Math.round(damage)} damage.`,
-          "enemy",
-        );
-      }
-
-      if (player.thorns > 0) {
-        const reflected = Math.min(
-          player.thorns,
-          enemyHp,
-        );
-
-        enemyHp -= reflected;
-
-        addLog(
-          `Thorns reflected ${Math.round(reflected)} damage.`,
-          "player",
-        );
-      }
-
-      if (enemy.lifesteal > 0) {
-        const healing =
-          damage * (enemy.lifesteal / 100);
-
-        enemyHp = Math.min(
-          enemy.maxHp,
-          enemyHp + healing,
-        );
-      }
+    if (enemyHp > 0) {
+      enemyHp = Math.min(
+        enemy.maxHp,
+        enemyHp + enemy.regeneration
+      );
     }
   }
 
-  const winner =
-    playerHp > 0 && enemyHp <= 0
-      ? "player"
-      : "enemy";
+  /*
+   * If a battle somehow reaches the cap, higher remaining HP wins.
+   */
+  if (
+    rounds >= 250 &&
+    playerHp > 0 &&
+    enemyHp > 0
+  ) {
+    return {
+      won: playerHp >= enemyHp,
+      playerHp,
+      enemyHp,
+      log,
+      rounds,
+    };
+  }
 
   return {
-    winner,
-    playerHp: Math.max(0, playerHp),
-    enemyHp: Math.max(0, enemyHp),
-    logs: logs.slice(-30),
-    turns,
+    won: enemyHp <= 0,
+    playerHp,
+    enemyHp,
+    log,
+    rounds,
   };
 }
 
-// ============================================================================
-// FORMAT
-// ============================================================================
+/* ============================================================================
+   PERSISTENCE
+   ========================================================================== */
+
+interface GameState {
+  allocation: Allocation;
+  checkpoint: number;
+  highestDepth: number;
+  totalWins: number;
+}
+
+const NEW_STORAGE_KEY = "phaser_battle_v2";
+const OLD_STORAGE_KEY = "tapgame_state_v1";
+
+function defaultGameState(): GameState {
+  return {
+    allocation: { ...EMPTY_ALLOCATION },
+    checkpoint: 0,
+    highestDepth: 0,
+    totalWins: 0,
+  };
+}
+
+function loadGameState(): GameState {
+  if (typeof window === "undefined") {
+    return defaultGameState();
+  }
+
+  try {
+    const raw =
+      window.localStorage.getItem(
+        NEW_STORAGE_KEY
+      );
+
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<GameState>;
+
+      return {
+        ...defaultGameState(),
+        ...parsed,
+        allocation: {
+          ...EMPTY_ALLOCATION,
+          ...(parsed.allocation ?? {}),
+        },
+      };
+    }
+
+    /*
+     * We deliberately inspect the old state only so this replacement
+     * does not crash an existing installation.
+     */
+    const oldRaw =
+      window.localStorage.getItem(
+        OLD_STORAGE_KEY
+      );
+
+    if (oldRaw) {
+      return defaultGameState();
+    }
+
+    return defaultGameState();
+  } catch {
+    return defaultGameState();
+  }
+}
+
+function saveGameState(state: GameState) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      NEW_STORAGE_KEY,
+      JSON.stringify(state)
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+/* ============================================================================
+   STAT DEFINITIONS
+   ========================================================================== */
+
+interface StatDefinition {
+  key: StatKey;
+  name: string;
+  short: string;
+  description: string;
+  icon: React.ReactNode;
+}
+
+const STAT_DEFINITIONS: StatDefinition[] = [
+  {
+    key: "vitality",
+    name: "Vitality",
+    short: "HP",
+    description: "+28 maximum HP",
+    icon: <Heart size={15} />,
+  },
+  {
+    key: "power",
+    name: "Power",
+    short: "ATK",
+    description: "+attack damage",
+    icon: <Swords size={15} />,
+  },
+  {
+    key: "armor",
+    name: "Armor",
+    short: "DEF",
+    description: "+defense",
+    icon: <Shield size={15} />,
+  },
+  {
+    key: "agility",
+    name: "Agility",
+    short: "SPD",
+    description: "+speed and dodge",
+    icon: <Zap size={15} />,
+  },
+  {
+    key: "precision",
+    name: "Precision",
+    short: "ACC",
+    description: "+accuracy and penetration",
+    icon: <Crosshair size={15} />,
+  },
+  {
+    key: "critical",
+    name: "Critical",
+    short: "CRIT",
+    description: "+crit chance and crit power",
+    icon: <Target size={15} />,
+  },
+  {
+    key: "evasion",
+    name: "Evasion",
+    short: "DODGE",
+    description: "+dodge chance",
+    icon: <Activity size={15} />,
+  },
+  {
+    key: "lifesteal",
+    name: "Lifesteal",
+    short: "LS",
+    description: "+% damage returned as HP",
+    icon: <Heart size={15} />,
+  },
+  {
+    key: "penetration",
+    name: "Penetration",
+    short: "PEN",
+    description: "Ignore enemy defense",
+    icon: <Crosshair size={15} />,
+  },
+  {
+    key: "fortitude",
+    name: "Fortitude",
+    short: "DR",
+    description: "+final damage reduction",
+    icon: <Shield size={15} />,
+  },
+  {
+    key: "regeneration",
+    name: "Regeneration",
+    short: "REGEN",
+    description: "Recover HP every round",
+    icon: <Activity size={15} />,
+  },
+  {
+    key: "block",
+    name: "Block",
+    short: "BLOCK",
+    description: "Chance to reduce incoming damage",
+    icon: <Shield size={15} />,
+  },
+  {
+    key: "counter",
+    name: "Counter",
+    short: "COUNTER",
+    description: "Chance to retaliate",
+    icon: <Swords size={15} />,
+  },
+];
+
+/* ============================================================================
+   FORMATTING
+   ========================================================================== */
 
 function formatNumber(value: number): string {
   if (!Number.isFinite(value)) return "0";
@@ -1063,276 +998,291 @@ function formatNumber(value: number): string {
 
   return new Intl.NumberFormat("en-US", {
     notation: "compact",
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 1,
   }).format(value);
 }
 
-function formatPercent(value: number) {
-  return `${Math.round(value)}%`;
+function pct(value: number): string {
+  return `${value.toFixed(1)}%`;
 }
 
-function rarityColor(
-  rarity: UpgradeCard["rarity"],
-): string {
-  switch (rarity) {
-    case "legendary":
-      return "#ffd166";
-    case "epic":
-      return "#c77dff";
-    case "rare":
-      return "#5dade2";
-    default:
-      return COLORS.chrome;
-  }
-}
-
-// ============================================================================
-// MAIN
-// ============================================================================
+/* ============================================================================
+   MAIN COMPONENT
+   ========================================================================== */
 
 export default function PhaserShooter({
   lifetimeKills,
   onExit,
 }: PhaserShooterProps) {
   const levelInfo = useMemo(
-    () => levelFromLifetimeKills(lifetimeKills),
-    [lifetimeKills],
+    () =>
+      levelFromLifetimeKills(
+        lifetimeKills
+      ),
+    [lifetimeKills]
   );
 
   const [phase, setPhase] =
     useState<Phase>("menu");
 
-  const [saved, setSaved] =
-    useState<SavedState>(() => loadSavedState());
+  const [gameState, setGameState] =
+    useState<GameState>(() =>
+      defaultGameState()
+    );
 
-  const [checkpoint, setCheckpoint] =
-    useState(0);
-
-  const [playerStats, setPlayerStats] =
-    useState<Stats>(() => createBaseStats(levelInfo));
+  const [hydrated, setHydrated] =
+    useState(false);
 
   const [enemy, setEnemy] =
     useState<Enemy | null>(null);
 
-  const [cards, setCards] =
-    useState<UpgradeCard[]>([]);
+  const [combat, setCombat] =
+    useState<CombatResult | null>(null);
 
-  const [selectedCards, setSelectedCards] =
-    useState<string[]>([]);
-
-  const [battle, setBattle] =
-    useState<BattleResult | null>(null);
-
-  const [battleStep, setBattleStep] =
-    useState(0);
-
-  const [isHydrated, setIsHydrated] =
+  const [fighting, setFighting] =
     useState(false);
 
-  // --------------------------------------------------------------------------
-  // Hydration
-  // --------------------------------------------------------------------------
+  const [toast, setToast] =
+    useState<string | null>(null);
+
+  const [showStats, setShowStats] =
+    useState(false);
+
+  const stats = useMemo(
+    () =>
+      buildPlayerStats(
+        gameState.allocation
+      ),
+    [gameState.allocation]
+  );
+
+  const allocatedPoints = useMemo(
+    () =>
+      Object.values(
+        gameState.allocation
+      ).reduce(
+        (sum, value) => sum + value,
+        0
+      ),
+    [gameState.allocation]
+  );
+
+  const availablePoints =
+    Math.max(
+      0,
+      levelInfo.level -
+        1 -
+        allocatedPoints
+    );
+
+  /* --------------------------------------------------------------------------
+     LOAD
+     ------------------------------------------------------------------------ */
 
   useEffect(() => {
-    setSaved(loadSavedState());
-    setIsHydrated(true);
+    setGameState(loadGameState());
+    setHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!isHydrated) return;
+    if (!hydrated) return;
+    saveGameState(gameState);
+  }, [gameState, hydrated]);
 
-    saveState(saved);
-  }, [saved, isHydrated]);
+  /* --------------------------------------------------------------------------
+     TOAST
+     ------------------------------------------------------------------------ */
 
-  // --------------------------------------------------------------------------
-  // Start
-  // --------------------------------------------------------------------------
+  useEffect(() => {
+    if (!toast) return;
 
-  const startRun = useCallback(() => {
-    const base = createBaseStats(levelInfo);
-
-    setCheckpoint(0);
-    setPlayerStats(base);
-    setSelectedCards([]);
-    setBattle(null);
-    setBattleStep(0);
-
-    const firstEnemy =
-      createEnemy(0, levelInfo);
-
-    setEnemy(firstEnemy);
-    setCards(drawCards(3));
-
-    setSaved((prev) => ({
-      ...prev,
-      totalRuns: prev.totalRuns + 1,
-    }));
-
-    setPhase("build");
-  }, [levelInfo]);
-
-  // --------------------------------------------------------------------------
-  // Pick card
-  // --------------------------------------------------------------------------
-
-  const chooseCard = useCallback(
-    (upgrade: UpgradeCard) => {
-      setPlayerStats((previous) =>
-        clampStats(
-          upgrade.apply(
-            cloneStats(previous),
-          ),
-        ),
+    const timeout =
+      window.setTimeout(
+        () => setToast(null),
+        2200
       );
 
-      setSelectedCards((previous) => [
-        ...previous,
-        upgrade.id,
-      ]);
+    return () =>
+      window.clearTimeout(timeout);
+  }, [toast]);
 
-      setPhase("battle");
+  /* --------------------------------------------------------------------------
+     ALLOCATION
+     ------------------------------------------------------------------------ */
+
+  const allocate = useCallback(
+    (key: StatKey) => {
+      if (availablePoints <= 0) {
+        setToast(
+          "No level points available."
+        );
+        return;
+      }
+
+      setGameState((previous) => ({
+        ...previous,
+        allocation: {
+          ...previous.allocation,
+          [key]:
+            previous.allocation[key] + 1,
+        },
+      }));
     },
-    [],
+    [availablePoints]
   );
 
-  // --------------------------------------------------------------------------
-  // Fight
-  // --------------------------------------------------------------------------
-
-  const fight = useCallback(() => {
-    if (!enemy) return;
-
-    const result = runBattle(
-      playerStats,
-      enemy.stats,
-    );
-
-    setBattle(result);
-    setBattleStep(0);
-  }, [enemy, playerStats]);
-
-  useEffect(() => {
-    if (phase !== "battle") return;
-    if (battle) return;
-
-    const timer = window.setTimeout(
-      fight,
-      350,
-    );
-
-    return () => window.clearTimeout(timer);
-  }, [phase, battle, fight]);
-
-  // --------------------------------------------------------------------------
-  // Battle animation
-  // --------------------------------------------------------------------------
-
-  useEffect(() => {
-    if (!battle) return;
-
-    if (
-      battleStep >= battle.logs.length
-    ) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setBattleStep((previous) =>
-        previous + 1,
-      );
-    }, 420);
-
-    return () => window.clearTimeout(timer);
-  }, [battle, battleStep]);
-
-  // --------------------------------------------------------------------------
-  // Battle finished
-  // --------------------------------------------------------------------------
-
-  const battleFinished =
-    !!battle &&
-    battleStep >= battle.logs.length;
-
-  useEffect(() => {
-    if (!battleFinished || !battle) return;
-
-    if (battle.winner === "enemy") {
-      setSaved((previous) => ({
-        ...previous,
-        bestCheckpoint: Math.max(
-          previous.bestCheckpoint,
-          checkpoint,
-        ),
-      }));
-
-      setPhase("result");
-
-      return;
-    }
-
-    // Player won.
-    setSaved((previous) => ({
+  const resetBuild = useCallback(() => {
+    setGameState((previous) => ({
       ...previous,
-      totalWins: previous.totalWins + 1,
-      bestCheckpoint: Math.max(
-        previous.bestCheckpoint,
-        checkpoint + 1,
-      ),
+      allocation: {
+        ...EMPTY_ALLOCATION,
+      },
     }));
+
+    setToast(
+      "Build reset. Redistribute your levels."
+    );
+  }, []);
+
+  /* --------------------------------------------------------------------------
+     START BATTLE
+     ------------------------------------------------------------------------ */
+
+  const startBattle = useCallback(
+    (depth: number) => {
+      const nextEnemy =
+        generateEnemy(
+          depth,
+          levelInfo.level
+        );
+
+      setEnemy(nextEnemy);
+      setCombat(null);
+      setPhase("battle");
+    },
+    [levelInfo.level]
+  );
+
+  const startFromCheckpoint =
+    useCallback(() => {
+      startBattle(
+        gameState.checkpoint + 1
+      );
+    }, [
+      gameState.checkpoint,
+      startBattle,
+    ]);
+
+  /* --------------------------------------------------------------------------
+     FIGHT
+     ------------------------------------------------------------------------ */
+
+  const fightEnemy = useCallback(() => {
+    if (!enemy || fighting) return;
+
+    setFighting(true);
+
+    /*
+     * Tiny delay makes the fight feel like an event rather than an
+     * instantaneous calculation.
+     */
+    window.setTimeout(() => {
+      const result = fight(
+        stats,
+        enemy,
+        Date.now() +
+          enemy.id * 997
+      );
+
+      setCombat(result);
+      setFighting(false);
+
+      if (result.won) {
+        const newDepth =
+          gameState.checkpoint +
+          1;
+
+        const newCheckpoint =
+          newDepth % 5 === 0
+            ? newDepth
+            : gameState.checkpoint;
+
+        setGameState(
+          (previous) => ({
+            ...previous,
+            checkpoint:
+              Math.max(
+                previous.checkpoint,
+                newCheckpoint
+              ),
+            highestDepth:
+              Math.max(
+                previous.highestDepth,
+                newDepth
+              ),
+            totalWins:
+              previous.totalWins + 1,
+          })
+        );
+
+        if (
+          newCheckpoint >
+          gameState.checkpoint
+        ) {
+          setToast(
+            `CHECKPOINT ${newCheckpoint} REACHED`
+          );
+        } else {
+          setToast(
+            "Enemy defeated. What's next?"
+          );
+        }
+      } else {
+        setToast(
+          `Defeated. Checkpoint ${gameState.checkpoint} restored.`
+        );
+      }
+    }, 350);
   }, [
-    battleFinished,
-    battle,
-    checkpoint,
+    enemy,
+    fighting,
+    stats,
+    gameState.checkpoint,
   ]);
 
-  // --------------------------------------------------------------------------
-  // Next enemy
-  // --------------------------------------------------------------------------
-
   const nextEnemy = useCallback(() => {
-    const nextCheckpoint =
-      checkpoint + 1;
-
-    const next = createEnemy(
-      nextCheckpoint,
-      levelInfo,
+    startBattle(
+      gameState.checkpoint + 1
     );
+  }, [
+    gameState.checkpoint,
+    startBattle,
+  ]);
 
-    setCheckpoint(nextCheckpoint);
-    setEnemy(next);
-    setCards(drawCards(3));
-    setBattle(null);
-    setBattleStep(0);
+  const backToMenu = useCallback(() => {
+    setPhase("menu");
+    setEnemy(null);
+    setCombat(null);
+  }, []);
 
-    setPhase("build");
-  }, [checkpoint, levelInfo]);
-
-  // --------------------------------------------------------------------------
-  // Restart
-  // --------------------------------------------------------------------------
-
-  const restartRun = useCallback(() => {
-    startRun();
-  }, [startRun]);
-
-  // --------------------------------------------------------------------------
-  // Render
-  // --------------------------------------------------------------------------
+  /* --------------------------------------------------------------------------
+     RENDER
+     ------------------------------------------------------------------------ */
 
   return (
     <div
       style={{
-        width: "100%",
         position: "relative",
+        width: "100%",
       }}
     >
       <AnimatePresence mode="wait">
         {phase === "menu" && (
           <motion.div
-            key="menu"
+            key="battle-menu"
             initial={{
               opacity: 0,
-              y: 10,
+              y: 8,
             }}
             animate={{
               opacity: 1,
@@ -1340,22 +1290,39 @@ export default function PhaserShooter({
             }}
             exit={{
               opacity: 0,
-              y: -10,
+              y: -8,
             }}
           >
             <Menu
               levelInfo={levelInfo}
-              saved={saved}
-              hydrated={isHydrated}
-              onStart={startRun}
+              stats={stats}
+              gameState={gameState}
+              availablePoints={
+                availablePoints
+              }
+              allocatedPoints={
+                allocatedPoints
+              }
+              hydrated={hydrated}
+              showStats={showStats}
+              onToggleStats={() =>
+                setShowStats(
+                  (value) => !value
+                )
+              }
+              onAllocate={allocate}
+              onReset={resetBuild}
+              onStart={
+                startFromCheckpoint
+              }
             />
           </motion.div>
         )}
 
-        {phase === "build" &&
+        {phase === "battle" &&
           enemy && (
             <motion.div
-              key={`build-${checkpoint}-${enemy.id}`}
+              key="battle"
               initial={{
                 opacity: 0,
                 scale: 0.98,
@@ -1369,87 +1336,46 @@ export default function PhaserShooter({
                 scale: 0.98,
               }}
             >
-              <BuildScreen
-                levelInfo={levelInfo}
-                checkpoint={checkpoint}
-                player={playerStats}
-                enemy={enemy}
-                cards={cards}
-                selectedCards={selectedCards}
-                onChoose={chooseCard}
-              />
-            </motion.div>
-          )}
-
-        {phase === "battle" &&
-          enemy && (
-            <motion.div
-              key="battle"
-              initial={{
-                opacity: 0,
-              }}
-              animate={{
-                opacity: 1,
-              }}
-            >
               <BattleScreen
-                checkpoint={checkpoint}
-                player={playerStats}
-                enemy={enemy}
-                battle={battle}
-                battleStep={battleStep}
-              />
-            </motion.div>
-          )}
-
-        {phase === "result" &&
-          battle &&
-          enemy && (
-            <motion.div
-              key="result"
-              initial={{
-                opacity: 0,
-                scale: 0.96,
-              }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-              }}
-            >
-              <ResultScreen
-                checkpoint={checkpoint}
-                battle={battle}
-                enemy={enemy}
-                bestCheckpoint={
-                  saved.bestCheckpoint
+                level={levelInfo.level}
+                depth={
+                  gameState.checkpoint +
+                  1
                 }
-                onRestart={restartRun}
-                onExit={onExit}
+                checkpoint={
+                  gameState.checkpoint
+                }
+                stats={stats}
+                enemy={enemy}
+                combat={combat}
+                fighting={fighting}
+                onFight={fightEnemy}
+                onNext={nextEnemy}
+                onBack={backToMenu}
               />
             </motion.div>
           )}
       </AnimatePresence>
 
-      {phase !== "result" && (
+      {phase === "menu" && (
         <button
           onClick={onExit}
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            gap: 5,
+            gap: 6,
             margin:
               "18px auto 0",
-            padding:
-              "7px 8px",
-            border: "none",
+            padding: "8px 4px",
             background:
               "transparent",
+            border: "none",
             color:
               COLORS.textMuted,
             fontFamily:
               FONT_MONO,
-            fontSize: 10,
+            fontSize: 10.5,
             textTransform:
               "uppercase",
             letterSpacing: 1,
@@ -1464,22 +1390,36 @@ export default function PhaserShooter({
   );
 }
 
-// ============================================================================
-// MENU
-// ============================================================================
+/* ============================================================================
+   MENU
+   ========================================================================== */
 
 function Menu({
   levelInfo,
-  saved,
+  stats,
+  gameState,
+  availablePoints,
+  allocatedPoints,
   hydrated,
+  showStats,
+  onToggleStats,
+  onAllocate,
+  onReset,
   onStart,
 }: {
   levelInfo: LevelInfo;
-  saved: SavedState;
+  stats: Stats;
+  gameState: GameState;
+  availablePoints: number;
+  allocatedPoints: number;
   hydrated: boolean;
+  showStats: boolean;
+  onToggleStats: () => void;
+  onAllocate: (key: StatKey) => void;
+  onReset: () => void;
   onStart: () => void;
 }) {
-  const xp =
+  const xpPct =
     levelInfo.xpForNextLevel > 0
       ? levelInfo.xpIntoLevel /
         levelInfo.xpForNextLevel
@@ -1487,25 +1427,26 @@ function Menu({
 
   return (
     <div>
+      {/* LEVEL / CHECKPOINT */}
       <div
         style={{
           padding:
-            "18px 16px",
-          border:
-            `1px solid ${COLORS.panelLine}`,
+            "16px 16px 14px",
+          borderRadius: 6,
           background:
             COLORS.panel,
-          borderRadius: 8,
-          marginBottom: 12,
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          marginBottom: 10,
         }}
       >
         <div
           style={{
             display: "flex",
+            alignItems: "center",
             justifyContent:
               "space-between",
-            alignItems:
-              "center",
+            gap: 12,
           }}
         >
           <div
@@ -1516,30 +1457,50 @@ function Menu({
               gap: 8,
             }}
           >
-            <Sparkles
+            <Zap
               size={17}
               color={
                 COLORS.chrome
               }
             />
 
-            <span
-              style={{
-                fontFamily:
-                  FONT_DISPLAY,
-                fontSize: 18,
-                fontWeight: 800,
-                color:
-                  COLORS.text,
-              }}
-            >
-              Level{" "}
-              {levelInfo.level}
-            </span>
+            <div>
+              <div
+                style={{
+                  fontFamily:
+                    FONT_DISPLAY,
+                  fontWeight: 700,
+                  fontSize: 16,
+                  color:
+                    COLORS.text,
+                }}
+              >
+                Level{" "}
+                {levelInfo.level}
+              </div>
+
+              <div
+                style={{
+                  fontFamily:
+                    FONT_MONO,
+                  fontSize: 9,
+                  color:
+                    COLORS.textMuted,
+                  marginTop: 2,
+                }}
+              >
+                {allocatedPoints}{" "}
+                allocated ·{" "}
+                {availablePoints}{" "}
+                available
+              </div>
+            </div>
           </div>
 
-          <span
+          <div
             style={{
+              textAlign:
+                "right",
               fontFamily:
                 FONT_MONO,
               fontSize: 9,
@@ -1547,33 +1508,42 @@ function Menu({
                 COLORS.textMuted,
             }}
           >
-            ×
-            {levelInfo.multiplier.toFixed(
-              2,
-            )} power
-          </span>
+            <div>
+              CP{" "}
+              {gameState.checkpoint}
+            </div>
+            <div
+              style={{
+                marginTop: 2,
+              }}
+            >
+              {gameState.totalWins}{" "}
+              wins
+            </div>
+          </div>
         </div>
 
         <div
           style={{
             height: 6,
-            marginTop: 12,
-            borderRadius: 4,
+            borderRadius: 3,
             background:
               COLORS.void,
+            marginTop: 10,
             overflow:
               "hidden",
           }}
         >
-          <motion.div
-            animate={{
-              width:
-                `${xp * 100}%`,
-            }}
+          <div
             style={{
               height: "100%",
+              width: `${
+                xpPct * 100
+              }%`,
               background:
                 COLORS.chrome,
+              transition:
+                "width 200ms ease",
             }}
           />
         </div>
@@ -1586,154 +1556,206 @@ function Menu({
             marginTop: 5,
             fontFamily:
               FONT_MONO,
-            fontSize: 8,
+            fontSize: 8.5,
             color:
               COLORS.textMuted,
           }}
         >
           <span>
-            {formatNumber(
-              levelInfo.xpIntoLevel,
-            )}{" "}
-            XP
+            {levelInfo.xpIntoLevel}
+            /
+            {levelInfo.xpForNextLevel}{" "}
+            productivity
           </span>
 
           <span>
-            {formatNumber(
-              levelInfo.xpForNextLevel,
-            )}{" "}
-            needed
+            Best depth{" "}
+            {gameState.highestDepth}
           </span>
         </div>
       </div>
 
+      {/* BUILD HEADER */}
       <div
         style={{
-          padding:
-            "18px 16px",
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          background:
-            COLORS.panel,
-          borderRadius: 8,
-          marginBottom: 12,
+          display: "flex",
+          alignItems:
+            "center",
+          justifyContent:
+            "space-between",
+          margin:
+            "14px 0 8px",
         }}
       >
         <div
           style={{
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10,
+            color:
+              COLORS.textMuted,
+            textTransform:
+              "uppercase",
+            letterSpacing: 1.5,
+          }}
+        >
+          Build your fighter
+        </div>
+
+        <button
+          onClick={onReset}
+          style={{
             display: "flex",
             alignItems:
               "center",
-            gap: 8,
-            marginBottom: 8,
-          }}
-        >
-          <Brain
-            size={17}
-            color={
-              COLORS.chrome
-            }
-          />
-
-          <span
-            style={{
-              fontFamily:
-                FONT_DISPLAY,
-              fontWeight: 800,
-              color:
-                COLORS.text,
-            }}
-          >
-            UNKNOWN BUILD
-          </span>
-        </div>
-
-        <p
-          style={{
-            margin: 0,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10.5,
-            lineHeight: 1.6,
+            gap: 4,
+            padding:
+              "5px 7px",
+            borderRadius: 4,
+            border:
+              `1px solid ${COLORS.panelLine}`,
+            background:
+              COLORS.panel,
             color:
               COLORS.textMuted,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 8.5,
+            cursor:
+              "pointer",
           }}
         >
-          Every run creates a different
-          enemy and a different set of
-          choices. Build your fighter,
-          discover what works, and see
-          what happens next.
-        </p>
+          <RotateCcw
+            size={10}
+          />
+          RESET
+        </button>
       </div>
 
+      {/* STAT ALLOCATION */}
       <div
         style={{
           display: "grid",
           gridTemplateColumns:
-            "repeat(3, 1fr)",
+            "1fr 1fr",
           gap: 7,
-          marginBottom: 14,
         }}
       >
-        <MiniStat
-          icon={
-            <Trophy size={14} />
-          }
-          label="BEST"
-          value={String(
-            saved.bestCheckpoint,
-          )}
-        />
+        {STAT_DEFINITIONS.map(
+          (definition) => {
+            const amount =
+              gameState
+                .allocation[
+                definition.key
+              ];
 
-        <MiniStat
-          icon={
-            <Swords size={14} />
+            return (
+              <StatAllocation
+                key={
+                  definition.key
+                }
+                definition={
+                  definition
+                }
+                amount={amount}
+                canAllocate={
+                  availablePoints >
+                  0
+                }
+                onAllocate={() =>
+                  onAllocate(
+                    definition.key
+                  )
+                }
+              />
+            );
           }
-          label="WINS"
-          value={String(
-            saved.totalWins,
-          )}
-        />
-
-        <MiniStat
-          icon={
-            <RefreshCw
-              size={14}
-            />
-          }
-          label="RUNS"
-          value={String(
-            saved.totalRuns,
-          )}
-        />
+        )}
       </div>
 
+      {/* CURRENT STATS */}
+      <button
+        onClick={
+          onToggleStats
+        }
+        style={{
+          width: "100%",
+          marginTop: 10,
+          padding:
+            "10px 12px",
+          borderRadius: 5,
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          background:
+            COLORS.panel,
+          color:
+            COLORS.textMuted,
+          fontFamily:
+            FONT_MONO,
+          fontSize: 9,
+          textTransform:
+            "uppercase",
+          letterSpacing:
+            0.8,
+          cursor:
+            "pointer",
+        }}
+      >
+        {showStats
+          ? "Hide combat stats"
+          : "Inspect combat stats"}
+      </button>
+
+      <AnimatePresence>
+        {showStats && (
+          <motion.div
+            initial={{
+              opacity: 0,
+              height: 0,
+            }}
+            animate={{
+              opacity: 1,
+              height: "auto",
+            }}
+            exit={{
+              opacity: 0,
+              height: 0,
+            }}
+            style={{
+              overflow:
+                "hidden",
+            }}
+          >
+            <CombatStats
+              stats={stats}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* START */}
       <button
         onClick={onStart}
         disabled={!hydrated}
         style={{
           width: "100%",
-          display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
-          gap: 8,
+          marginTop: 12,
           padding:
-            "14px 12px",
+            "14px 0",
+          borderRadius: 5,
           border: "none",
-          borderRadius: 6,
           background:
             COLORS.chrome,
           color:
             COLORS.void,
           fontFamily:
             FONT_DISPLAY,
+          fontWeight: 700,
           fontSize: 13,
-          fontWeight: 800,
           letterSpacing:
             0.8,
+          textTransform:
+            "uppercase",
           cursor:
             hydrated
               ? "pointer"
@@ -1741,158 +1763,22 @@ function Menu({
           opacity:
             hydrated
               ? 1
-              : 0.5,
+              : 0.6,
+          display: "flex",
+          alignItems:
+            "center",
+          justifyContent:
+            "center",
+          gap: 7,
         }}
       >
-        <Play size={15} />
-        ENTER THE UNKNOWN
+        <Swords size={15} />
+        Fight next enemy
       </button>
-    </div>
-  );
-}
-
-// ============================================================================
-// BUILD SCREEN
-// ============================================================================
-
-function BuildScreen({
-  levelInfo,
-  checkpoint,
-  player,
-  enemy,
-  cards,
-  selectedCards,
-  onChoose,
-}: {
-  levelInfo: LevelInfo;
-  checkpoint: number;
-  player: Stats;
-  enemy: Enemy;
-  cards: UpgradeCard[];
-  selectedCards: string[];
-  onChoose: (
-    card: UpgradeCard,
-  ) => void;
-}) {
-  return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent:
-            "space-between",
-          alignItems:
-            "center",
-          marginBottom: 10,
-        }}
-      >
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          LEVEL{" "}
-          {levelInfo.level}
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            alignItems:
-              "center",
-            gap: 5,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              COLORS.chrome,
-          }}
-        >
-          <Target size={12} />
-          CHECKPOINT{" "}
-          {checkpoint}
-        </div>
-      </div>
-
-      <EnemyPreview enemy={enemy} />
 
       <div
         style={{
-          marginTop: 15,
-          marginBottom: 8,
-          display: "flex",
-          justifyContent:
-            "space-between",
-          alignItems:
-            "center",
-        }}
-      >
-        <span
-          style={{
-            fontFamily:
-              FONT_DISPLAY,
-            fontSize: 14,
-            fontWeight: 800,
-            color:
-              COLORS.text,
-          }}
-        >
-          WHAT DO YOU PICK?
-        </span>
-
-        <span
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          Choose 1
-        </span>
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          flexDirection:
-            "column",
-          gap: 9,
-        }}
-      >
-        {cards.map(
-          (upgrade) => (
-            <UpgradeCardView
-              key={
-                upgrade.id
-              }
-              upgrade={
-                upgrade
-              }
-              player={
-                player
-              }
-              disabled={selectedCards.includes(
-                upgrade.id,
-              )}
-              onClick={() =>
-                onChoose(
-                  upgrade,
-                )
-              }
-            />
-          ),
-        )}
-      </div>
-
-      <div
-        style={{
-          marginTop: 12,
+          marginTop: 8,
           textAlign:
             "center",
           fontFamily:
@@ -1902,93 +1788,429 @@ function BuildScreen({
             COLORS.textMuted,
         }}
       >
-        You cannot know what comes next.
-        Choose based on calculation or
-        intuition.
+        Every 5 victories =
+        checkpoint
       </div>
     </div>
   );
 }
 
-// ============================================================================
-// ENEMY PREVIEW
-// ============================================================================
+/* ============================================================================
+   STAT ALLOCATION CARD
+   ========================================================================== */
 
-function EnemyPreview({
-  enemy,
+function StatAllocation({
+  definition,
+  amount,
+  canAllocate,
+  onAllocate,
 }: {
-  enemy: Enemy;
+  definition: StatDefinition;
+  amount: number;
+  canAllocate: boolean;
+  onAllocate: () => void;
 }) {
-  const s = enemy.stats;
-
-  const rarity =
-    enemy.rarity === "boss"
-      ? "#ff6b6b"
-      : enemy.rarity ===
-          "elite"
-        ? "#c77dff"
-        : COLORS.chrome;
-
   return (
-    <div
+    <motion.button
+      whileTap={
+        canAllocate
+          ? { scale: 0.97 }
+          : undefined
+      }
+      onClick={onAllocate}
+      disabled={!canAllocate}
       style={{
+        minWidth: 0,
+        textAlign:
+          "left",
         padding:
-          "14px 14px",
-        borderRadius: 8,
+          "10px 10px",
+        borderRadius: 5,
         border:
-          `1px solid ${rarity}55`,
+          `1px solid ${
+            amount > 0
+              ? `${COLORS.chrome}55`
+              : COLORS.panelLine
+          }`,
         background:
-          COLORS.panel,
-        boxShadow:
-          `0 0 20px ${rarity}10`,
+          amount > 0
+            ? `${COLORS.chrome}0c`
+            : COLORS.panel,
+        color:
+          COLORS.text,
+        cursor:
+          canAllocate
+            ? "pointer"
+            : "not-allowed",
+        opacity:
+          canAllocate
+            ? 1
+            : 0.62,
       }}
     >
       <div
         style={{
           display: "flex",
-          justifyContent:
-            "space-between",
           alignItems:
             "center",
+          gap: 6,
         }}
       >
-        <div
+        <span
           style={{
+            color:
+              amount > 0
+                ? COLORS.chrome
+                : COLORS.textMuted,
             display: "flex",
+          }}
+        >
+          {definition.icon}
+        </span>
+
+        <span
+          style={{
+            fontFamily:
+              FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 11,
+            flex: 1,
+          }}
+        >
+          {definition.name}
+        </span>
+
+        <span
+          style={{
+            fontFamily:
+              FONT_MONO,
+            fontSize: 10,
+            color:
+              amount > 0
+                ? COLORS.chrome
+                : COLORS.textMuted,
+            fontWeight: 700,
+          }}
+        >
+          +{amount}
+        </span>
+      </div>
+
+      <div
+        style={{
+          fontFamily:
+            FONT_MONO,
+          fontSize: 8,
+          color:
+            COLORS.textMuted,
+          marginTop: 4,
+          lineHeight: 1.3,
+        }}
+      >
+        {definition.description}
+      </div>
+    </motion.button>
+  );
+}
+
+/* ============================================================================
+   COMBAT STATS
+   ========================================================================== */
+
+function CombatStats({
+  stats,
+}: {
+  stats: Stats;
+}) {
+  const values = [
+    ["HP", formatNumber(stats.maxHp)],
+    ["ATK", formatNumber(stats.attack)],
+    ["DEF", formatNumber(stats.defense)],
+    ["SPD", formatNumber(stats.speed)],
+    ["ACC", pct(stats.accuracy)],
+    ["CRIT", pct(stats.critChance)],
+    [
+      "CRIT DMG",
+      `${stats.critMultiplier.toFixed(
+        2
+      )}x`,
+    ],
+    ["DODGE", pct(stats.dodgeChance)],
+    ["LIFESTEAL", pct(stats.lifesteal)],
+    ["PEN", pct(stats.penetration)],
+    [
+      "FINAL DR",
+      pct(stats.damageReduction),
+    ],
+    [
+      "REGEN",
+      formatNumber(stats.regeneration),
+    ],
+    ["BLOCK", pct(stats.blockChance)],
+    ["COUNTER", pct(stats.counterChance)],
+  ];
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns:
+          "repeat(2, 1fr)",
+        gap: 5,
+        marginTop: 7,
+        padding: 8,
+        borderRadius: 5,
+        background:
+          COLORS.void,
+        border:
+          `1px solid ${COLORS.panelLine}`,
+      }}
+    >
+      {values.map(
+        ([label, value]) => (
+          <div
+            key={label}
+            style={{
+              display:
+                "flex",
+              justifyContent:
+                "space-between",
+              gap: 5,
+              fontFamily:
+                FONT_MONO,
+              fontSize: 8.5,
+            }}
+          >
+            <span
+              style={{
+                color:
+                  COLORS.textMuted,
+              }}
+            >
+              {label}
+            </span>
+
+            <span
+              style={{
+                color:
+                  COLORS.text,
+                fontWeight: 700,
+              }}
+            >
+              {value}
+            </span>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   BATTLE SCREEN
+   ========================================================================== */
+
+function BattleScreen({
+  level,
+  depth,
+  checkpoint,
+  stats,
+  enemy,
+  combat,
+  fighting,
+  onFight,
+  onNext,
+  onBack,
+}: {
+  level: number;
+  depth: number;
+  checkpoint: number;
+  stats: Stats;
+  enemy: Enemy;
+  combat: CombatResult | null;
+  fighting: boolean;
+  onFight: () => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const playerHp =
+    combat?.playerHp ??
+    stats.maxHp;
+
+  const enemyHp =
+    combat?.enemyHp ??
+    enemy.maxHp;
+
+  const playerHpPct =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        playerHp /
+          stats.maxHp
+      )
+    );
+
+  const enemyHpPct =
+    Math.max(
+      0,
+      Math.min(
+        1,
+        enemyHp /
+          enemy.maxHp
+      )
+    );
+
+  return (
+    <div>
+      {/* HEADER */}
+      <div
+        style={{
+          display:
+            "flex",
+          alignItems:
+            "center",
+          justifyContent:
+            "space-between",
+          marginBottom: 10,
+        }}
+      >
+        <button
+          onClick={onBack}
+          style={{
+            display:
+              "flex",
             alignItems:
               "center",
-            gap: 8,
+            gap: 5,
+            padding:
+              "6px 8px",
+            borderRadius: 4,
+            border:
+              `1px solid ${COLORS.panelLine}`,
+            background:
+              COLORS.panel,
+            color:
+              COLORS.textMuted,
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            cursor:
+              "pointer",
+          }}
+        >
+          <ArrowLeft
+            size={11}
+          />
+          Build
+        </button>
+
+        <div
+          style={{
+            textAlign:
+              "center",
+            fontFamily:
+              FONT_MONO,
           }}
         >
           <div
             style={{
-              width: 38,
-              height: 38,
-              borderRadius: 7,
-              display: "flex",
+              fontSize: 9,
+              color:
+                COLORS.textMuted,
+              textTransform:
+                "uppercase",
+              letterSpacing:
+                1,
+            }}
+          >
+            Enemy {depth}
+          </div>
+
+          <div
+            style={{
+              fontSize: 10,
+              color:
+                COLORS.chrome,
+              marginTop: 2,
+            }}
+          >
+            Checkpoint{" "}
+            {checkpoint}
+          </div>
+        </div>
+
+        <div
+          style={{
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
+          }}
+        >
+          Lv {level}
+        </div>
+      </div>
+
+      {/* ENEMY */}
+      <div
+        style={{
+          padding:
+            "16px 14px",
+          borderRadius: 6,
+          background:
+            COLORS.panel,
+          border:
+            `1px solid ${COLORS.panelLine}`,
+          marginBottom: 9,
+        }}
+      >
+        <div
+          style={{
+            display:
+              "flex",
+            alignItems:
+              "center",
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 6,
+              display:
+                "flex",
               alignItems:
                 "center",
               justifyContent:
                 "center",
               background:
-                `${rarity}18`,
+                "#d9575718",
+              border:
+                "1px solid #d9575735",
+              flexShrink: 0,
             }}
           >
             <Skull
               size={20}
-              color={
-                rarity
-              }
+              color="#d95757"
             />
           </div>
 
-          <div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
             <div
               style={{
                 fontFamily:
                   FONT_DISPLAY,
-                fontSize: 15,
-                fontWeight: 800,
+                fontWeight: 700,
+                fontSize: 16,
                 color:
                   COLORS.text,
               }}
@@ -2000,782 +2222,332 @@ function EnemyPreview({
               style={{
                 fontFamily:
                   FONT_MONO,
-                fontSize: 8.5,
+                fontSize: 9,
                 color:
-                  rarity,
-                textTransform:
-                  "uppercase",
+                  COLORS.textMuted,
+                marginTop: 2,
               }}
             >
-              {enemy.title} ·{" "}
-              {enemy.rarity}
+              Lv {enemy.level} ·{" "}
+              {enemy.archetype}
             </div>
           </div>
         </div>
 
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          LV {enemy.level}
-        </div>
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns:
-            "repeat(4, 1fr)",
-          gap: 5,
-          marginTop: 12,
-        }}
-      >
-        <StatBox
-          label="HP"
-          value={s.maxHp}
+        <HealthBar
+          label="ENEMY"
+          current={enemyHp}
+          max={enemy.maxHp}
+          percentage={
+            enemyHpPct
+          }
+          enemy
         />
 
-        <StatBox
-          label="ATK"
-          value={s.attack}
-        />
-
-        <StatBox
-          label="DEF"
-          value={s.defense}
-        />
-
-        <StatBox
-          label="CRIT"
-          value={s.crit}
-          percent
-        />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          flexWrap:
-            "wrap",
-          gap: 5,
-          marginTop: 8,
-        }}
-      >
-        <Badge>
-          Dodge{" "}
-          {formatPercent(
-            s.dodge,
-          )}
-        </Badge>
-
-        <Badge>
-          Reduce{" "}
-          {formatPercent(
-            s.damageReduction,
-          )}
-        </Badge>
-
-        <Badge>
-          Pen{" "}
-          {formatPercent(
-            s.penetration,
-          )}
-        </Badge>
-
-        <Badge>
-          Speed{" "}
-          {s.attackSpeed.toFixed(
-            1,
-          )}
-        </Badge>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// UPGRADE CARD
-// ============================================================================
-
-function UpgradeCardView({
-  upgrade,
-  player,
-  disabled,
-  onClick,
-}: {
-  upgrade: UpgradeCard;
-  player: Stats;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  const color =
-    rarityColor(
-      upgrade.rarity,
-    );
-
-  const preview =
-    upgrade.apply(
-      cloneStats(
-        player,
-      ),
-    );
-
-  return (
-    <motion.button
-      whileHover={
-        !disabled
-          ? {
-              scale: 1.015,
-              y: -2,
-            }
-          : undefined
-      }
-      whileTap={
-        !disabled
-          ? {
-              scale: 0.985,
-            }
-          : undefined
-      }
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        width: "100%",
-        textAlign:
-          "left",
-        padding:
-          "13px 13px",
-        borderRadius: 7,
-        border:
-          `1px solid ${color}55`,
-        background:
-          COLORS.panel,
-        cursor:
-          disabled
-            ? "default"
-            : "pointer",
-        opacity:
-          disabled
-            ? 0.45
-            : 1,
-        position:
-          "relative",
-        overflow:
-          "hidden",
-      }}
-    >
-      <div
-        style={{
-          position:
-            "absolute",
-          top: 0,
-          left: 0,
-          bottom: 0,
-          width: 3,
-          background:
-            color,
-        }}
-      />
-
-      <div
-        style={{
-          display: "flex",
-          justifyContent:
-            "space-between",
-          gap: 10,
-        }}
-      >
-        <div
-          style={{
-            minWidth: 0,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems:
-                "center",
-              gap: 7,
-            }}
-          >
-            <span
-              style={{
-                fontFamily:
-                  FONT_DISPLAY,
-                fontSize: 14,
-                fontWeight: 800,
-                color:
-                  COLORS.text,
-              }}
-            >
-              {upgrade.name}
-            </span>
-
-            <span
-              style={{
-                fontFamily:
-                  FONT_MONO,
-                fontSize: 7.5,
-                padding:
-                  "2px 5px",
-                borderRadius: 3,
-                background:
-                  `${color}18`,
-                color,
-              }}
-            >
-              {upgrade.rarity}
-            </span>
-          </div>
-
-          <div
-            style={{
-              marginTop: 4,
-              fontFamily:
-                FONT_MONO,
-              fontSize: 9.5,
-              lineHeight: 1.45,
-              color:
-                COLORS.textMuted,
-            }}
-          >
-            {
-              upgrade.description
-            }
-          </div>
-        </div>
-
-        <ArrowRight
-          size={15}
-          color={color}
-          style={{
-            flexShrink: 0,
-            marginTop: 2,
-          }}
-        />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          flexWrap:
-            "wrap",
-          gap: 4,
-          marginTop: 8,
-        }}
-      >
-        <PreviewChange
-          label="ATK"
-          before={
-            player.attack
-          }
-          after={
-            preview.attack
-          }
-        />
-
-        <PreviewChange
-          label="HP"
-          before={
-            player.maxHp
-          }
-          after={
-            preview.maxHp
-          }
-        />
-
-        <PreviewChange
-          label="DEF"
-          before={
-            player.defense
-          }
-          after={
-            preview.defense
-          }
-        />
-
-        <PreviewChange
-          label="CRIT"
-          before={
-            player.crit
-          }
-          after={
-            preview.crit
-          }
-          percent
-        />
-      </div>
-    </motion.button>
-  );
-}
-
-function PreviewChange({
-  label,
-  before,
-  after,
-  percent = false,
-}: {
-  label: string;
-  before: number;
-  after: number;
-  percent?: boolean;
-}) {
-  const difference =
-    after - before;
-
-  if (
-    Math.abs(
-      difference,
-    ) < 0.01
-  ) {
-    return null;
-  }
-
-  const positive =
-    difference > 0;
-
-  return (
-    <span
-      style={{
-        padding:
-          "2px 5px",
-        borderRadius: 3,
-        background:
-          positive
-            ? "#7fd48a18"
-            : "#ff6b6b18",
-        color:
-          positive
-            ? "#7fd48a"
-            : "#ff6b6b",
-        fontFamily:
-          FONT_MONO,
-        fontSize: 7.5,
-      }}
-    >
-      {label}{" "}
-      {positive
-        ? "+"
-        : ""}
-      {percent
-        ? Math.round(
-            difference,
-          )
-        : formatNumber(
-            difference,
-          )}
-      {percent
-        ? "%"
-        : ""}
-    </span>
-  );
-}
-
-// ============================================================================
-// BATTLE SCREEN
-// ============================================================================
-
-function BattleScreen({
-  checkpoint,
-  player,
-  enemy,
-  battle,
-  battleStep,
-}: {
-  checkpoint: number;
-  player: Stats;
-  enemy: Enemy;
-  battle: BattleResult | null;
-  battleStep: number;
-}) {
-  const playerHp =
-    battle
-      ? battle.playerHp
-      : player.hp;
-
-  const enemyHp =
-    battle
-      ? battle.enemyHp
-      : enemy.stats.hp;
-
-  const visibleLogs =
-    battle
-      ? battle.logs.slice(
-          0,
-          battleStep,
-        )
-      : [];
-
-  const playerPct =
-    Math.max(
-      0,
-      playerHp /
-        player.maxHp,
-    );
-
-  const enemyPct =
-    Math.max(
-      0,
-      enemyHp /
-        enemy.stats.maxHp,
-    );
-
-  return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent:
-            "space-between",
-          alignItems:
-            "center",
-          marginBottom: 10,
-        }}
-      >
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          CHECKPOINT{" "}
-          {checkpoint}
-        </div>
-
-        <motion.div
-          animate={{
-            opacity:
-              battle
-                ? [1, 0.4, 1]
-                : 1,
-          }}
-          transition={{
-            duration: 0.8,
-            repeat:
-              battle
-                ? Infinity
-                : 0,
-          }}
-          style={{
-            display: "flex",
-            alignItems:
-              "center",
-            gap: 5,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9,
-            color:
-              COLORS.chrome,
-          }}
-        >
-          <Swords size={12} />
-          FIGHTING
-        </motion.div>
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns:
-            "1fr 38px 1fr",
-          gap: 7,
-          alignItems:
-            "center",
-        }}
-      >
-        <Fighter
-          name="YOU"
-          icon={
-            <Shield
-              size={20}
-            />
-          }
-          hp={playerHp}
-          maxHp={
-            player.maxHp
-          }
-          attack={
-            player.attack
-          }
-          accent={
-            COLORS.chrome
-          }
-        />
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent:
-              "center",
-          }}
-        >
-          <motion.div
-            animate={{
-              rotate: [0, 15, -15, 0],
-            }}
-            transition={{
-              duration: 0.8,
-              repeat:
-                Infinity,
-            }}
-          >
-            <Swords
-              size={22}
-              color={
-                COLORS.chrome
-              }
-            />
-          </motion.div>
-        </div>
-
-        <Fighter
-          name={
-            enemy.name
-          }
-          icon={
-            <Skull
-              size={20}
-            />
-          }
-          hp={enemyHp}
-          maxHp={
-            enemy.stats
-              .maxHp
-          }
-          attack={
-            enemy.stats
-              .attack
-          }
-          accent="#ff6b6b"
-        />
-      </div>
-
-      <div
-        style={{
-          marginTop: 12,
-          padding:
-            "10px 11px",
-          borderRadius: 7,
-          background:
-            COLORS.panel,
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          minHeight: 190,
-          maxHeight: 260,
-          overflowY:
-            "auto",
-        }}
-      >
-        {visibleLogs.length ===
-        0 ? (
-          <div
-            style={{
-              height: 170,
-              display: "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              fontFamily:
-                FONT_MONO,
-              fontSize: 10,
-              color:
-                COLORS.textMuted,
-            }}
-          >
-            Calculating outcome...
-          </div>
-        ) : (
-          <div
-            style={{
-              display:
-                "flex",
-              flexDirection:
-                "column",
-              gap: 5,
-            }}
-          >
-            {visibleLogs.map(
-              (log) => (
-                <motion.div
-                  key={
-                    log.id
-                  }
-                  initial={{
-                    opacity: 0,
-                    x: -5,
-                  }}
-                  animate={{
-                    opacity: 1,
-                    x: 0,
-                  }}
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 9,
-                    color:
-                      log.type ===
-                      "critical"
-                        ? "#ffd166"
-                        : log.type ===
-                            "enemy"
-                          ? "#ff8a8a"
-                          : log.type ===
-                              "player"
-                            ? "#8be0a0"
-                            : COLORS.textMuted,
-                  }}
-                >
-                  {log.text}
-                </motion.div>
-              ),
-            )}
-          </div>
-        )}
-      </div>
-
-      {battle && (
         <div
           style={{
             display:
               "grid",
             gridTemplateColumns:
-              "1fr 1fr",
-            gap: 7,
-            marginTop: 8,
+              "repeat(3, 1fr)",
+            gap: 5,
+            marginTop: 10,
           }}
         >
-          <StatBox
-            label="TURNS"
-            value={
-              battle.turns
-            }
+          <MiniStat
+            label="HP"
+            value={formatNumber(
+              enemyHp
+            )}
           />
-
-          <StatBox
-            label="OUTCOME"
-            value={
-              battle.winner ===
-              "player"
-                ? "WIN"
-                : "LOSS"
-            }
+          <MiniStat
+            label="ATK"
+            value={formatNumber(
+              enemy.attack
+            )}
+          />
+          <MiniStat
+            label="DEF"
+            value={formatNumber(
+              enemy.defense
+            )}
           />
         </div>
-      )}
-
-      <div
-        style={{
-          display: "none",
-        }}
-      >
-        {playerPct}
-        {enemyPct}
       </div>
-    </div>
-  );
-}
 
-function Fighter({
-  name,
-  icon,
-  hp,
-  maxHp,
-  attack,
-  accent,
-}: {
-  name: string;
-  icon: React.ReactNode;
-  hp: number;
-  maxHp: number;
-  attack: number;
-  accent: string;
-}) {
-  const hpPct =
-    Math.max(
-      0,
-      Math.min(
-        1,
-        hp / maxHp,
-      ),
-    );
-
-  return (
-    <div
-      style={{
-        padding:
-          "12px 10px",
-        borderRadius: 7,
-        background:
-          COLORS.panel,
-        border:
-          `1px solid ${accent}44`,
-      }}
-    >
+      {/* VS */}
       <div
         style={{
-          display: "flex",
+          display:
+            "flex",
           alignItems:
             "center",
-          justifyContent:
-            "center",
-          gap: 6,
-          color:
-            accent,
-          fontFamily:
-            FONT_DISPLAY,
-          fontSize: 10,
-          fontWeight: 800,
-          overflow:
-            "hidden",
-          textOverflow:
-            "ellipsis",
-          whiteSpace:
-            "nowrap",
+          gap: 8,
+          margin:
+            "8px 0",
         }}
       >
-        {icon}
-        {name}
-      </div>
-
-      <div
-        style={{
-          marginTop: 10,
-          height: 7,
-          borderRadius: 4,
-          background:
-            COLORS.void,
-          overflow:
-            "hidden",
-        }}
-      >
-        <motion.div
-          animate={{
-            width:
-              `${hpPct * 100}%`,
-          }}
+        <div
           style={{
-            height: "100%",
+            flex: 1,
+            height: 1,
             background:
-              accent,
+              COLORS.panelLine,
+          }}
+        />
+
+        <span
+          style={{
+            fontFamily:
+              FONT_MONO,
+            fontWeight: 700,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
+          }}
+        >
+          VS
+        </span>
+
+        <div
+          style={{
+            flex: 1,
+            height: 1,
+            background:
+              COLORS.panelLine,
           }}
         />
       </div>
 
+      {/* PLAYER */}
       <div
         style={{
-          display: "flex",
+          padding:
+            "16px 14px",
+          borderRadius: 6,
+          background:
+            COLORS.panel,
+          border:
+            `1px solid ${COLORS.chrome}35`,
+        }}
+      >
+        <div
+          style={{
+            display:
+              "flex",
+            alignItems:
+              "center",
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 6,
+              display:
+                "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "center",
+              background:
+                `${COLORS.chrome}18`,
+              border:
+                `1px solid ${COLORS.chrome}35`,
+            }}
+          >
+            <Trophy
+              size={20}
+              color={
+                COLORS.chrome
+              }
+            />
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+            }}
+          >
+            <div
+              style={{
+                fontFamily:
+                  FONT_DISPLAY,
+                fontWeight: 700,
+                fontSize: 16,
+                color:
+                  COLORS.text,
+              }}
+            >
+              YOU
+            </div>
+
+            <div
+              style={{
+                fontFamily:
+                  FONT_MONO,
+                fontSize: 9,
+                color:
+                  COLORS.textMuted,
+                marginTop: 2,
+              }}
+            >
+              Level {level}
+            </div>
+          </div>
+        </div>
+
+        <HealthBar
+          label="YOU"
+          current={playerHp}
+          max={stats.maxHp}
+          percentage={
+            playerHpPct
+          }
+        />
+
+        <div
+          style={{
+            display:
+              "grid",
+            gridTemplateColumns:
+              "repeat(4, 1fr)",
+            gap: 5,
+            marginTop: 10,
+          }}
+        >
+          <MiniStat
+            label="ATK"
+            value={formatNumber(
+              stats.attack
+            )}
+          />
+          <MiniStat
+            label="DEF"
+            value={formatNumber(
+              stats.defense
+            )}
+          />
+          <MiniStat
+            label="DODGE"
+            value={pct(
+              stats.dodgeChance
+            )}
+          />
+          <MiniStat
+            label="CRIT"
+            value={pct(
+              stats.critChance
+            )}
+          />
+        </div>
+      </div>
+
+      {/* FIGHT BUTTON */}
+      {!combat && (
+        <motion.button
+          whileTap={{
+            scale: 0.98,
+          }}
+          onClick={onFight}
+          disabled={fighting}
+          style={{
+            width: "100%",
+            marginTop: 12,
+            padding:
+              "15px 0",
+            borderRadius: 5,
+            border: "none",
+            background:
+              fighting
+                ? COLORS.panelLine
+                : COLORS.chrome,
+            color:
+              fighting
+                ? COLORS.textMuted
+                : COLORS.void,
+            fontFamily:
+              FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 14,
+            letterSpacing:
+              1,
+            textTransform:
+              "uppercase",
+            cursor:
+              fighting
+                ? "wait"
+                : "pointer",
+            display:
+              "flex",
+            alignItems:
+              "center",
+            justifyContent:
+              "center",
+            gap: 7,
+          }}
+        >
+          {fighting ? (
+            <>
+              <Activity
+                size={16}
+              />
+              Simulating...
+            </>
+          ) : (
+            <>
+              <Swords
+                size={16}
+              />
+              Fight
+            </>
+          )}
+        </motion.button>
+      )}
+
+      {/* RESULT */}
+      {combat && (
+        <BattleResult
+          combat={combat}
+          onNext={onNext}
+          onBack={onBack}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   HEALTH BAR
+   ========================================================================== */
+
+function HealthBar({
+  label,
+  current,
+  max,
+  percentage,
+  enemy = false,
+}: {
+  label: string;
+  current: number;
+  max: number;
+  percentage: number;
+  enemy?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        marginTop: 12,
+      }}
+    >
+      <div
+        style={{
+          display:
+            "flex",
           justifyContent:
             "space-between",
-          marginTop: 4,
+          marginBottom: 4,
           fontFamily:
             FONT_MONO,
           fontSize: 8,
@@ -2783,346 +2555,60 @@ function Fighter({
             COLORS.textMuted,
         }}
       >
+        <span>{label}</span>
         <span>
-          HP{" "}
           {formatNumber(
-            hp,
-          )}
-        </span>
-
-        <span>
-          ATK{" "}
-          {formatNumber(
-            attack,
-          )}
+            current
+          )}{" "}
+          /{" "}
+          {formatNumber(max)}
         </span>
       </div>
-    </div>
-  );
-}
 
-// ============================================================================
-// RESULT
-// ============================================================================
-
-function ResultScreen({
-  checkpoint,
-  battle,
-  enemy,
-  bestCheckpoint,
-  onRestart,
-  onExit,
-}: {
-  checkpoint: number;
-  battle: BattleResult;
-  enemy: Enemy;
-  bestCheckpoint: number;
-  onRestart: () => void;
-  onExit: () => void;
-}) {
-  const won =
-    battle.winner ===
-    "player";
-
-  return (
-    <div
-      style={{
-        textAlign:
-          "center",
-      }}
-    >
-      <motion.div
-        initial={{
-          scale: 0.5,
-          rotate: -10,
-        }}
-        animate={{
-          scale: 1,
-          rotate: 0,
-        }}
-        transition={{
-          type: "spring",
-        }}
+      <div
         style={{
-          width: 70,
-          height: 70,
-          margin:
-            "5px auto 14px",
-          borderRadius:
-            "50%",
-          display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
+          height: 8,
+          borderRadius: 4,
           background:
-            won
-              ? `${COLORS.chrome}18`
-              : "#ff6b6b18",
-          border:
-            `1px solid ${
-              won
-                ? COLORS.chrome
-                : "#ff6b6b"
-            }55`,
-        }}
-      >
-        {won ? (
-          <Trophy
-            size={31}
-            color={
-              COLORS.chrome
-            }
-          />
-        ) : (
-          <Skull
-            size={31}
-            color="#ff6b6b"
-          />
-        )}
-      </motion.div>
-
-      <div
-        style={{
-          fontFamily:
-            FONT_DISPLAY,
-          fontSize: 24,
-          fontWeight: 900,
-          color:
-            COLORS.text,
-        }}
-      >
-        {won
-          ? "YOU WON"
-          : "BUILD DESTROYED"}
-      </div>
-
-      <div
-        style={{
-          marginTop: 5,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 10,
-          color:
-            COLORS.textMuted,
-        }}
-      >
-        {won
-          ? `Checkpoint ${checkpoint} cleared`
-          : `${enemy.name} ended the run`}
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns:
-            "1fr 1fr",
-          gap: 8,
-          marginTop: 18,
-        }}
-      >
-        <MiniStat
-          icon={
-            <Target size={14} />
-          }
-          label="CHECKPOINT"
-          value={String(
-            checkpoint,
-          )}
-        />
-
-        <MiniStat
-          icon={
-            <Trophy size={14} />
-          }
-          label="BEST"
-          value={String(
-            bestCheckpoint,
-          )}
-        />
-      </div>
-
-      <div
-        style={{
-          marginTop: 12,
-          padding:
-            "13px 14px",
-          borderRadius: 7,
-          background:
-            COLORS.panel,
+            COLORS.void,
           border:
             `1px solid ${COLORS.panelLine}`,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 9.5,
-          lineHeight: 1.6,
-          color:
-            COLORS.textMuted,
+          overflow:
+            "hidden",
         }}
       >
-        The next run will generate
-        a completely different
-        combination of enemies and
-        choices.
-      </div>
-
-      <button
-        onClick={onRestart}
-        style={{
-          width: "100%",
-          marginTop: 12,
-          padding:
-            "13px 10px",
-          border: "none",
-          borderRadius: 6,
-          background:
-            COLORS.chrome,
-          color:
-            COLORS.void,
-          fontFamily:
-            FONT_DISPLAY,
-          fontSize: 12,
-          fontWeight: 800,
-          cursor:
-            "pointer",
-        }}
-      >
-        <RefreshCw
-          size={14}
+        <motion.div
+          animate={{
+            width: `${
+              percentage *
+              100
+            }%`,
+          }}
+          transition={{
+            duration:
+              0.35,
+          }}
           style={{
-            verticalAlign:
-              "middle",
-            marginRight: 6,
+            height: "100%",
+            background:
+              enemy
+                ? "#d95757"
+                : COLORS.chrome,
           }}
         />
-        TRY A NEW BUILD
-      </button>
-
-      <button
-        onClick={onExit}
-        style={{
-          width: "100%",
-          marginTop: 7,
-          padding:
-            "11px 10px",
-          border:
-            `1px solid ${COLORS.panelLine}`,
-          borderRadius: 6,
-          background:
-            COLORS.panel,
-          color:
-            COLORS.textMuted,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 10,
-          cursor:
-            "pointer",
-        }}
-      >
-        EXIT
-      </button>
-    </div>
-  );
-}
-
-// ============================================================================
-// SMALL COMPONENTS
-// ============================================================================
-
-function StatBox({
-  label,
-  value,
-  percent = false,
-}: {
-  label: string;
-  value: number | string;
-  percent?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        padding:
-          "7px 6px",
-        borderRadius: 4,
-        background:
-          COLORS.void,
-        border:
-          `1px solid ${COLORS.panelLine}`,
-        textAlign:
-          "center",
-      }}
-    >
-      <div
-        style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 7,
-          color:
-            COLORS.textMuted,
-        }}
-      >
-        {label}
-      </div>
-
-      <div
-        style={{
-          marginTop: 2,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 10,
-          fontWeight: 700,
-          color:
-            COLORS.text,
-        }}
-      >
-        {typeof value ===
-        "number"
-          ? percent
-            ? formatPercent(
-                value,
-              )
-            : formatNumber(
-                value,
-              )
-          : value}
       </div>
     </div>
   );
 }
 
-function Badge({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <span
-      style={{
-        padding:
-          "3px 5px",
-        borderRadius: 3,
-        background:
-          COLORS.void,
-        border:
-          `1px solid ${COLORS.panelLine}`,
-        fontFamily:
-          FONT_MONO,
-        fontSize: 7,
-        color:
-          COLORS.textMuted,
-      }}
-    >
-      {children}
-    </span>
-  );
-}
+/* ============================================================================
+   MINI STAT
+   ========================================================================== */
 
 function MiniStat({
-  icon,
   label,
   value,
 }: {
-  icon: React.ReactNode;
   label: string;
   value: string;
 }) {
@@ -3130,48 +2616,16 @@ function MiniStat({
     <div
       style={{
         padding:
-          "10px 7px",
-        borderRadius: 6,
+          "6px 5px",
+        borderRadius: 4,
         background:
-          COLORS.panel,
-        border:
-          `1px solid ${COLORS.panelLine}`,
+          COLORS.void,
         textAlign:
           "center",
       }}
     >
       <div
         style={{
-          display: "flex",
-          justifyContent:
-            "center",
-          alignItems:
-            "center",
-          gap: 4,
-          color:
-            COLORS.chrome,
-        }}
-      >
-        {icon}
-      </div>
-
-      <div
-        style={{
-          marginTop: 3,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 12,
-          fontWeight: 700,
-          color:
-            COLORS.text,
-        }}
-      >
-        {value}
-      </div>
-
-      <div
-        style={{
-          marginTop: 2,
           fontFamily:
             FONT_MONO,
           fontSize: 7,
@@ -3181,6 +2635,235 @@ function MiniStat({
       >
         {label}
       </div>
+
+      <div
+        style={{
+          fontFamily:
+            FONT_MONO,
+          fontSize: 9,
+          fontWeight: 700,
+          color:
+            COLORS.text,
+          marginTop: 2,
+        }}
+      >
+        {value}
+      </div>
     </div>
+  );
+}
+
+/* ============================================================================
+   BATTLE RESULT
+   ========================================================================== */
+
+function BattleResult({
+  combat,
+  onNext,
+  onBack,
+}: {
+  combat: CombatResult;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const won = combat.won;
+
+  /*
+   * Only show the final part of the combat log.
+   *
+   * This keeps the UI compact while preserving the important information.
+   */
+  const visibleLog =
+    combat.log.slice(-7);
+
+  return (
+    <motion.div
+      initial={{
+        opacity: 0,
+        y: 8,
+      }}
+      animate={{
+        opacity: 1,
+        y: 0,
+      }}
+      style={{
+        marginTop: 12,
+      }}
+    >
+      <div
+        style={{
+          padding:
+            "14px 14px",
+          borderRadius: 6,
+          border: `1px solid ${
+            won
+              ? `${COLORS.chrome}55`
+              : "#d9575744"
+          }`,
+          background:
+            COLORS.panel,
+        }}
+      >
+        <div
+          style={{
+            textAlign:
+              "center",
+            fontFamily:
+              FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 19,
+            color:
+              won
+                ? COLORS.chrome
+                : "#d95757",
+          }}
+        >
+          {won
+            ? "VICTORY"
+            : "DEFEATED"}
+        </div>
+
+        <div
+          style={{
+            textAlign:
+              "center",
+            fontFamily:
+              FONT_MONO,
+            fontSize: 9,
+            color:
+              COLORS.textMuted,
+            marginTop: 3,
+          }}
+        >
+          {combat.rounds} combat rounds
+        </div>
+
+        <div
+          style={{
+            marginTop: 11,
+            display:
+              "flex",
+            flexDirection:
+              "column",
+            gap: 4,
+            maxHeight: 145,
+            overflowY:
+              "auto",
+          }}
+        >
+          {visibleLog.map(
+            (entry) => (
+              <div
+                key={
+                  entry.id
+                }
+                style={{
+                  fontFamily:
+                    FONT_MONO,
+                  fontSize: 8.5,
+                  color:
+                    entry.type ===
+                    "critical"
+                      ? COLORS.chrome
+                      : entry.type ===
+                        "enemy"
+                      ? "#d95757"
+                      : entry.type ===
+                        "heal"
+                      ? "#7fd48a"
+                      : COLORS.textMuted,
+                  padding:
+                    "2px 0",
+                }}
+              >
+                {entry.text}
+              </div>
+            )
+          )}
+        </div>
+
+        {won ? (
+          <button
+            onClick={onNext}
+            style={{
+              width:
+                "100%",
+              marginTop: 12,
+              padding:
+                "13px 0",
+              borderRadius: 5,
+              border:
+                "none",
+              background:
+                COLORS.chrome,
+              color:
+                COLORS.void,
+              fontFamily:
+                FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 12,
+              letterSpacing:
+                0.8,
+              textTransform:
+                "uppercase",
+              cursor:
+                "pointer",
+              display:
+                "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "center",
+              gap: 6,
+            }}
+          >
+            <Dices
+              size={14}
+            />
+            Generate next enemy
+          </button>
+        ) : (
+          <button
+            onClick={onBack}
+            style={{
+              width:
+                "100%",
+              marginTop: 12,
+              padding:
+                "13px 0",
+              borderRadius: 5,
+              border:
+                `1px solid ${COLORS.chrome}55`,
+              background:
+                `${COLORS.chrome}12`,
+              color:
+                COLORS.chrome,
+              fontFamily:
+                FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 12,
+              letterSpacing:
+                0.8,
+              textTransform:
+                "uppercase",
+              cursor:
+                "pointer",
+              display:
+                "flex",
+              alignItems:
+                "center",
+              justifyContent:
+                "center",
+              gap: 6,
+            }}
+          >
+            <RotateCcw
+              size={14}
+            />
+            Rebuild at checkpoint
+          </button>
+        )}
+      </div>
+    </motion.div>
   );
 }
