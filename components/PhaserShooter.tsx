@@ -1,1991 +1,1143 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
   Play,
+  Shield,
+  Sword,
   Zap,
-  Trophy,
-  Sparkles,
-  HelpCircle,
-  FlaskConical,
-  Lock,
+  Heart,
+  Flame,
+  Snowflake,
+  Skull,
+  RefreshCw,
   Eye,
+  Sparkles,
+  ChevronRight,
+  Trophy,
+  Swords,
   RotateCcw,
-  ArrowRight,
-  Star,
-  Shuffle,
-  Search,
+  Brain,
+  Crosshair,
 } from "lucide-react";
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
 
-type Phase = "menu" | "playing";
+type Phase = "menu" | "build" | "battle" | "result";
 
 interface PhaserShooterProps {
+  /** Lifetime kills across all productivity categories — powers the level. */
   lifetimeKills: number;
   onExit: () => void;
-}
-
-// ============================================================================
-// LEVEL
-// ============================================================================
-//
-// 521 lifetime kills = 1 level.
-// 1 level = 2 days of productivity.
-//
-// The level does NOT dictate the exact answer.
-// It increases the size of the possibility space.
-//
-// More productivity = more powerful experiments.
-//
-// ============================================================================
-
-const KILLS_PER_LEVEL = 521;
-const LEVEL_GROWTH = 1.32;
-
-interface LevelInfo {
-  level: number;
-  xpIntoLevel: number;
-  xpForNextLevel: number;
-  progressPct: number;
-  multiplier: number;
-}
-
-function levelFromLifetimeKills(
-  lifetimeKills: number
-): LevelInfo {
-  const kills = Math.max(
-    0,
-    Math.floor(lifetimeKills)
-  );
-
-  const level =
-    Math.floor(
-      kills / KILLS_PER_LEVEL
-    ) + 1;
-
-  const xpIntoLevel =
-    kills % KILLS_PER_LEVEL;
-
-  const multiplier = Math.pow(
-    LEVEL_GROWTH,
-    level - 1
-  );
-
-  return {
-    level,
-    xpIntoLevel,
-    xpForNextLevel:
-      KILLS_PER_LEVEL,
-    progressPct:
-      xpIntoLevel /
-      KILLS_PER_LEVEL,
-    multiplier,
-  };
 }
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
-type ActionId =
-  | "inspect"
-  | "touch"
-  | "wait"
-  | "combine"
-  | "reverse"
-  | "remove"
-  | "repeat"
-  | "follow";
+type Element = "fire" | "ice" | "shock" | "void" | "physical";
 
-interface Action {
-  id: ActionId;
-  label: string;
-  description: string;
-  icon: ReactNode;
-}
+type Trait =
+  | "berserker"
+  | "guardian"
+  | "vampire"
+  | "glass"
+  | "regenerator"
+  | "thorns"
+  | "evasive"
+  | "unstable";
 
-interface Experiment {
+interface Item {
   id: string;
-  title: string;
-  question: string;
-  object: string;
-  atmosphere: string;
-  actions: Action[];
+  name: string;
+  icon: string;
+  rarity: "common" | "rare" | "epic" | "legendary";
+  element: Element;
+  description: string;
+
+  attack: number;
+  defense: number;
+  health: number;
+  speed: number;
+  crit: number;
+  lifesteal: number;
+
+  strongAgainst?: Element;
+  weakAgainst?: Element;
 }
 
-interface Result {
+interface Enemy {
+  name: string;
   title: string;
+  icon: string;
+  element: Element;
+  trait: Trait;
+
+  attack: number;
+  defense: number;
+  health: number;
+  speed: number;
+  crit: number;
+
+  weakness: Element;
+  resistance: Element;
+
+  description: string;
+}
+
+interface BuildStats {
+  attack: number;
+  defense: number;
+  health: number;
+  speed: number;
+  crit: number;
+  lifesteal: number;
+}
+
+interface BattleLog {
   text: string;
-  rarity: "common" | "rare" | "strange" | "unknown";
-  points: number;
-  discovered: boolean;
-  clue?: string;
+  type: "normal" | "good" | "bad" | "critical";
 }
 
 interface GameState {
-  lastPlayDate: string;
+  discovered: string[];
+  victories: number;
+  defeats: number;
+  bestStreak: number;
+  currentStreak: number;
+}
 
-  points: number;
-  discoveries: number;
+const STORAGE_KEY = "adaptive_battle_game_v2";
 
-  experimentsToday: number;
-  bestExperimentScore: number;
+// ============================================================================
+// RANDOMIZATION
+// ============================================================================
 
-  currentExperimentId: string;
-  history: string[];
+function randomInt(min: number, max: number) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
-  discoveredResults: string[];
+function pick<T>(array: T[]): T {
+  return array[Math.floor(Math.random() * array.length)];
+}
 
-  personalBest: number;
-  targetBest: number;
+function shuffle<T>(array: T[]): T[] {
+  return [...array].sort(() => Math.random() - 0.5);
 }
 
 // ============================================================================
-// EXPERIMENTS
-// ============================================================================
+// LEVEL SYSTEM
 //
-// The important part:
+// Each lifetime kill contributes to level progression.
+// The amount required per level remains stable so that the user's
+// existing lifetimeKills integration remains meaningful.
 //
-// There is NO single obvious optimal button.
-//
-// The player is encouraged to ask:
-//
-// "What happens if I inspect it first?"
-// "What if I wait?"
-// "What if I reverse what I just did?"
-// "What if I combine them?"
-// "What happens if I do the weird thing?"
-//
+// Combat power increases EXPONENTIALLY from level.
 // ============================================================================
 
-const EXPERIMENTS: Experiment[] = [
-  {
-    id: "red-box",
-    title: "THE RED BOX",
-    question:
-      "What happens if you don't open it immediately?",
-    object:
-      "A small red box is sitting in the middle of an empty room.",
-    atmosphere:
-      "It is warm. You don't remember putting it there.",
-    actions: [
-      {
-        id: "inspect",
-        label: "Inspect",
-        description:
-          "Look closely before touching it.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "touch",
-        label: "Touch",
-        description:
-          "Put your hand on the box.",
-        icon: <Search size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Wait",
-        description:
-          "Do absolutely nothing.",
-        icon: <Sparkles size={15} />,
-      },
-      {
-        id: "reverse",
-        label: "Walk away",
-        description:
-          "Leave the box alone.",
-        icon: <ArrowRight size={15} />,
-      },
-    ],
-  },
-
-  {
-    id: "three-switches",
-    title: "THREE SWITCHES",
-    question:
-      "Only one combination does something. Which?",
-    object:
-      "Three switches sit beneath a completely dark screen.",
-    atmosphere:
-      "There are no instructions.",
-    actions: [
-      {
-        id: "inspect",
-        label: "Inspect",
-        description:
-          "Look for a clue.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "touch",
-        label: "Switch 1",
-        description:
-          "Flip the first switch.",
-        icon: <Zap size={15} />,
-      },
-      {
-        id: "combine",
-        label: "Switch 2 + 3",
-        description:
-          "Try two at once.",
-        icon: <Shuffle size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Wait",
-        description:
-          "See whether something happens.",
-        icon: <Sparkles size={15} />,
-      },
-    ],
-  },
-
-  {
-    id: "glass-orb",
-    title: "THE GLASS ORB",
-    question:
-      "Why does it react differently every time?",
-    object:
-      "A transparent orb floats a few centimeters above the floor.",
-    atmosphere:
-      "It changes color when you approach.",
-    actions: [
-      {
-        id: "touch",
-        label: "Touch",
-        description:
-          "Touch the surface.",
-        icon: <Search size={15} />,
-      },
-      {
-        id: "inspect",
-        label: "Observe",
-        description:
-          "Watch it carefully.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Wait",
-        description:
-          "Give it time.",
-        icon: <Sparkles size={15} />,
-      },
-      {
-        id: "reverse",
-        label: "Back away",
-        description:
-          "Move away from it.",
-        icon: <ArrowRight size={15} />,
-      },
-    ],
-  },
-
-  {
-    id: "locked-door",
-    title: "THE LOCKED DOOR",
-    question:
-      "There is no key. So what opens it?",
-    object:
-      "A completely ordinary door has no handle and no visible lock.",
-    atmosphere:
-      "Something is moving behind it.",
-    actions: [
-      {
-        id: "inspect",
-        label: "Inspect",
-        description:
-          "Study the door.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "touch",
-        label: "Knock",
-        description:
-          "Knock three times.",
-        icon: <Search size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Listen",
-        description:
-          "Stand completely still.",
-        icon: <Sparkles size={15} />,
-      },
-      {
-        id: "remove",
-        label: "Remove",
-        description:
-          "Try something unexpected.",
-        icon: <FlaskConical size={15} />,
-      },
-    ],
-  },
-
-  {
-    id: "machine",
-    title: "THE MACHINE",
-    question:
-      "It has one button. But what does the button do?",
-    object:
-      "A strange machine hums quietly.",
-    atmosphere:
-      "The display reads: 'ARE YOU SURE?'",
-    actions: [
-      {
-        id: "touch",
-        label: "Press",
-        description:
-          "Press the button.",
-        icon: <Zap size={15} />,
-      },
-      {
-        id: "inspect",
-        label: "Inspect",
-        description:
-          "Search the machine.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Wait",
-        description:
-          "Don't press anything.",
-        icon: <Sparkles size={15} />,
-      },
-      {
-        id: "reverse",
-        label: "Unplug",
-        description:
-          "Try the opposite.",
-        icon: <ArrowRight size={15} />,
-      },
-    ],
-  },
-
-  {
-    id: "black-hole",
-    title: "THE BLACK DOT",
-    question:
-      "What happens if you get closer?",
-    object:
-      "A perfectly black dot floats in the air.",
-    atmosphere:
-      "It appears to be much deeper than the room.",
-    actions: [
-      {
-        id: "inspect",
-        label: "Study",
-        description:
-          "Try to understand it.",
-        icon: <Eye size={15} />,
-      },
-      {
-        id: "touch",
-        label: "Touch",
-        description:
-          "Reach toward it.",
-        icon: <Search size={15} />,
-      },
-      {
-        id: "wait",
-        label: "Wait",
-        description:
-          "Let it change.",
-        icon: <Sparkles size={15} />,
-      },
-      {
-        id: "follow",
-        label: "Enter",
-        description:
-          "Stop being cautious.",
-        icon: <ArrowRight size={15} />,
-      },
-    ],
-  },
-];
-
-// ============================================================================
-// RESULT ENGINE
-// ============================================================================
-//
-// Results are intentionally partly deterministic and partly surprising.
-//
-// Same experiment + same action can produce different outcomes.
-//
-// But previous actions also influence the hidden result.
-//
-// That creates:
-//
-// "I got THIS last time..."
-// "What if I do something different?"
-//
-// ============================================================================
-
-const RESULT_TITLES = [
-  "Nothing happened.",
-  "Something moved.",
-  "You found a hidden mechanism.",
-  "That wasn't supposed to happen.",
-  "It reacted to you.",
-  "You discovered a pattern.",
-  "The room changed.",
-  "You found something behind it.",
-  "It remembered your last move.",
-  "You discovered a secret.",
-];
-
-function hashString(value: string): number {
-  let hash = 0;
-
-  for (
-    let i = 0;
-    i < value.length;
-    i++
-  ) {
-    hash =
-      (hash << 5) -
-      hash +
-      value.charCodeAt(i);
-
-    hash |= 0;
-  }
-
-  return Math.abs(hash);
+interface LevelInfo {
+  level: number;
+  xpIntoLevel: number;
+  xpForNextLevel: number;
+  powerMultiplier: number;
 }
 
-function generateResult(
-  experiment: Experiment,
-  action: ActionId,
-  history: string[],
-  levelInfo: LevelInfo
-): Result {
-  const previous =
-    history.length > 0
-      ? history[
-          history.length - 1
-        ]
-      : "none";
+function xpForLevel(_level: number): number {
+  return 521;
+}
 
-  const seed =
-    hashString(
-      `${experiment.id}:${action}:${previous}:${history.length}:${Math.floor(
-        Math.random() * 7
-      )}`
-    );
+function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
+  let level = 1;
+  let xp = Math.max(0, Math.floor(lifetimeKills));
 
-  const roll =
-    seed % 100;
-
-  let rarity:
-    | "common"
-    | "rare"
-    | "strange"
-    | "unknown";
-
-  if (roll < 50) {
-    rarity = "common";
-  } else if (roll < 78) {
-    rarity = "rare";
-  } else if (roll < 94) {
-    rarity = "strange";
-  } else {
-    rarity = "unknown";
+  while (xp >= xpForLevel(level)) {
+    xp -= xpForLevel(level);
+    level++;
   }
 
-  const actionResults: Record<
-    ActionId,
-    string[]
-  > = {
-    inspect: [
-      "You notice a tiny detail that wasn't obvious before.",
-      "There is a pattern hidden in the surface.",
-      "You realize the object has been reacting to you.",
-      "Something changes when you stop looking directly at it.",
-    ],
+  return {
+    level,
+    xpIntoLevel: xp,
+    xpForNextLevel: xpForLevel(level),
 
-    touch: [
-      "The object becomes slightly warmer.",
-      "You feel a tiny vibration.",
-      "Something responds from the other side.",
-      "The object changes state.",
-    ],
-
-    wait: [
-      "Nothing happens... for now.",
-      "After a few seconds, something moves.",
-      "The silence itself seems to be part of the experiment.",
-      "You notice something you would have missed by acting.",
-    ],
-
-    combine: [
-      "The two actions interact unexpectedly.",
-      "The machine enters a new state.",
-      "Something that was invisible becomes visible.",
-      "You accidentally discovered a combination.",
-    ],
-
-    reverse: [
-      "The object reacts to you leaving.",
-      "Going backward reveals something new.",
-      "The system seems to prefer the opposite action.",
-      "You discover that retreat was actually progress.",
-    ],
-
-    remove: [
-      "You find something hidden underneath.",
-      "Removing one thing changes everything else.",
-      "The object was hiding a second mechanism.",
-      "You found the simplest solution.",
-    ],
-
-    repeat: [
-      "It behaves differently the second time.",
-      "The result changes.",
-      "It seems to remember what you did.",
-      "Repeating the experiment reveals a new state.",
-    ],
-
-    follow: [
-      "You follow the strange signal.",
-      "The path changes as you move.",
-      "You discover something completely unexpected.",
-      "There was another room all along.",
-    ],
+    // Exponential progression.
+    // Level 1 = 1x
+    // Level 2 = ~1.7x
+    // Level 5 = ~6.8x
+    // Level 10 = ~31x
+    // Level 20 = ~370x
+    powerMultiplier: Math.pow(1.17, level - 1),
   };
+}
 
-  const options =
-    actionResults[action];
+// ============================================================================
+// ELEMENT SYSTEM
+// ============================================================================
 
-  const text =
-    options[
-      seed % options.length
-    ];
+const ELEMENTS: Record<
+  Element,
+  {
+    label: string;
+    icon: string;
+    color: string;
+    strongAgainst: Element;
+    weakAgainst: Element;
+  }
+> = {
+  fire: {
+    label: "Fire",
+    icon: "🔥",
+    color: "#ff795f",
+    strongAgainst: "ice",
+    weakAgainst: "water" as Element,
+  },
 
-  const title =
-    rarity === "unknown"
-      ? "???"
-      : RESULT_TITLES[
-          seed %
-            RESULT_TITLES.length
-        ];
+  ice: {
+    label: "Ice",
+    icon: "❄️",
+    color: "#76c9ff",
+    strongAgainst: "shock",
+    weakAgainst: "fire",
+  },
 
-  const basePoints =
-    rarity === "common"
-      ? 10
-      : rarity === "rare"
-        ? 30
-        : rarity === "strange"
-          ? 75
-          : 200;
+  shock: {
+    label: "Shock",
+    icon: "⚡",
+    color: "#e5c75f",
+    strongAgainst: "physical",
+    weakAgainst: "ice",
+  },
 
-  const points = Math.max(
-    1,
-    Math.round(
-      basePoints *
-        levelInfo.multiplier
-    )
+  void: {
+    label: "Void",
+    icon: "◈",
+    color: "#c18cff",
+    strongAgainst: "fire",
+    weakAgainst: "physical",
+  },
+
+  physical: {
+    label: "Steel",
+    icon: "⚔️",
+    color: COLORS.chrome,
+    strongAgainst: "void",
+    weakAgainst: "shock",
+  },
+};
+
+// ============================================================================
+// ITEM DATABASE
+//
+// Items are intentionally asymmetric.
+// There is no single universally best item.
+// ============================================================================
+
+const ITEM_POOL: Item[] = [
+  {
+    id: "iron-sword",
+    name: "Iron Fang",
+    icon: "⚔️",
+    rarity: "common",
+    element: "physical",
+    description: "Reliable damage. Nothing fancy.",
+    attack: 18,
+    defense: 2,
+    health: 0,
+    speed: 0,
+    crit: 3,
+    lifesteal: 0,
+  },
+  {
+    id: "thorn-armor",
+    name: "Thorn Shell",
+    icon: "🌵",
+    rarity: "rare",
+    element: "physical",
+    description: "Turns defense into punishment.",
+    attack: 4,
+    defense: 22,
+    health: 18,
+    speed: -2,
+    crit: 0,
+    lifesteal: 0,
+  },
+  {
+    id: "flame-core",
+    name: "Flame Core",
+    icon: "🔥",
+    rarity: "rare",
+    element: "fire",
+    description: "Huge offensive pressure.",
+    attack: 31,
+    defense: -5,
+    health: 0,
+    speed: 2,
+    crit: 6,
+    lifesteal: 0,
+    strongAgainst: "ice",
+    weakAgainst: "void",
+  },
+  {
+    id: "frost-heart",
+    name: "Frost Heart",
+    icon: "❄️",
+    rarity: "rare",
+    element: "ice",
+    description: "Slow, durable and difficult to break.",
+    attack: 9,
+    defense: 19,
+    health: 35,
+    speed: -4,
+    crit: 0,
+    lifesteal: 2,
+    strongAgainst: "shock",
+    weakAgainst: "fire",
+  },
+  {
+    id: "storm-engine",
+    name: "Storm Engine",
+    icon: "⚡",
+    rarity: "epic",
+    element: "shock",
+    description: "Speed creates explosive openings.",
+    attack: 20,
+    defense: 2,
+    health: 0,
+    speed: 18,
+    crit: 12,
+    lifesteal: 0,
+    strongAgainst: "physical",
+    weakAgainst: "ice",
+  },
+  {
+    id: "void-mask",
+    name: "Void Mask",
+    icon: "🎭",
+    rarity: "epic",
+    element: "void",
+    description: "Sacrifice defense for strange power.",
+    attack: 26,
+    defense: -8,
+    health: -10,
+    speed: 15,
+    crit: 15,
+    lifesteal: 5,
+    strongAgainst: "fire",
+    weakAgainst: "physical",
+  },
+  {
+    id: "blood-crown",
+    name: "Blood Crown",
+    icon: "👑",
+    rarity: "legendary",
+    element: "void",
+    description: "Every hit becomes a little more dangerous.",
+    attack: 23,
+    defense: 5,
+    health: 15,
+    speed: 8,
+    crit: 8,
+    lifesteal: 18,
+  },
+  {
+    id: "glass-cannon",
+    name: "Glass Cannon",
+    icon: "💎",
+    rarity: "epic",
+    element: "fire",
+    description: "Ridiculous offense. Almost no forgiveness.",
+    attack: 54,
+    defense: -25,
+    health: -25,
+    speed: 5,
+    crit: 20,
+    lifesteal: 0,
+    strongAgainst: "ice",
+    weakAgainst: "void",
+  },
+  {
+    id: "gravity-plate",
+    name: "Gravity Plate",
+    icon: "🛡️",
+    rarity: "legendary",
+    element: "physical",
+    description: "Almost impossible to move.",
+    attack: 5,
+    defense: 45,
+    health: 55,
+    speed: -18,
+    crit: 0,
+    lifesteal: 0,
+    strongAgainst: "void",
+    weakAgainst: "shock",
+  },
+  {
+    id: "phantom-cloak",
+    name: "Phantom Cloak",
+    icon: "🪽",
+    rarity: "legendary",
+    element: "void",
+    description: "Avoid the hit instead of surviving it.",
+    attack: 12,
+    defense: 8,
+    health: 10,
+    speed: 35,
+    crit: 9,
+    lifesteal: 4,
+    strongAgainst: "fire",
+    weakAgainst: "physical",
+  },
+];
+
+// ============================================================================
+// ENEMY GENERATION
+//
+// Every run generates a different enemy combination.
+// ============================================================================
+
+const ENEMY_NAMES = [
+  "Morrow",
+  "Vex",
+  "Ruin",
+  "Kairo",
+  "Nyx",
+  "Sol",
+  "Axiom",
+  "Grim",
+  "Echo",
+  "Rook",
+  "Vale",
+  "Nero",
+];
+
+const ENEMY_TITLES = [
+  "the Unfinished",
+  "the Hungry",
+  "the Counter",
+  "the Wanderer",
+  "the Unstable",
+  "the Silent",
+  "the Collector",
+  "the Broken",
+  "the Patient",
+  "the Gambler",
+];
+
+const ENEMY_ICONS = ["👹", "🧿", "🤖", "👾", "☠️", "🦂", "🦾", "🐉", "🕷️"];
+
+const TRAITS: Trait[] = [
+  "berserker",
+  "guardian",
+  "vampire",
+  "glass",
+  "regenerator",
+  "thorns",
+  "evasive",
+  "unstable",
+];
+
+const TRAIT_TEXT: Record<Trait, string> = {
+  berserker: "Gets stronger as health falls.",
+  guardian: "Takes significantly reduced damage.",
+  vampire: "Heals from every successful attack.",
+  glass: "Extremely dangerous but extremely fragile.",
+  regenerator: "Slowly regenerates health.",
+  thorns: "Damages attackers whenever struck.",
+  evasive: "Sometimes completely avoids attacks.",
+  unstable: "Randomly becomes much stronger or weaker.",
+};
+
+function generateEnemy(level: number): Enemy {
+  const element = pick(Object.keys(ELEMENTS) as Element[]);
+
+  const possibleWeaknesses = (Object.keys(ELEMENTS) as Element[]).filter(
+    (e) => e !== element
   );
 
-  const discovered =
-    rarity !== "common" ||
-    roll > 35;
+  const weakness = pick(possibleWeaknesses);
 
-  const clue =
-    rarity === "unknown"
-      ? "There is more here than you can currently see."
-      : rarity === "strange"
-        ? "Try a different action next time."
-        : undefined;
+  const possibleResistances = (Object.keys(ELEMENTS) as Element[]).filter(
+    (e) => e !== element && e !== weakness
+  );
+
+  const resistance = pick(possibleResistances);
+
+  const trait = pick(TRAITS);
+
+  const difficulty = Math.pow(1.145, Math.max(0, level - 1));
+
+  let health = 130 * difficulty;
+  let attack = 18 * difficulty;
+  let defense = 8 * difficulty;
+  let speed = 10 + level * 0.7;
+  let crit = 4;
+
+  switch (trait) {
+    case "berserker":
+      attack *= 1.28;
+      health *= 0.9;
+      break;
+
+    case "guardian":
+      defense *= 1.55;
+      health *= 1.18;
+      attack *= 0.82;
+      break;
+
+    case "vampire":
+      attack *= 1.05;
+      health *= 1.1;
+      break;
+
+    case "glass":
+      attack *= 1.65;
+      health *= 0.58;
+      defense *= 0.65;
+      crit += 15;
+      break;
+
+    case "regenerator":
+      health *= 1.28;
+      defense *= 1.05;
+      break;
+
+    case "thorns":
+      defense *= 1.25;
+      health *= 1.15;
+      break;
+
+    case "evasive":
+      speed *= 1.5;
+      health *= 0.92;
+      break;
+
+    case "unstable":
+      if (Math.random() > 0.5) {
+        attack *= 1.6;
+        health *= 0.75;
+      } else {
+        attack *= 0.75;
+        health *= 1.55;
+      }
+      break;
+  }
 
   return {
-    title,
-    text,
-    rarity,
-    points,
-    discovered,
-    clue,
+    name: pick(ENEMY_NAMES),
+    title: pick(ENEMY_TITLES),
+    icon: pick(ENEMY_ICONS),
+    element,
+    trait,
+    attack,
+    defense,
+    health,
+    speed,
+    crit,
+    weakness,
+    resistance,
+    description: TRAIT_TEXT[trait],
   };
 }
 
 // ============================================================================
-// STORAGE
+// BUILD GENERATION
 // ============================================================================
 
-const STORAGE_KEY =
-  "curiosity_game_state_v1";
+function generateChoices(enemy: Enemy): Item[] {
+  // Occasionally produce a deliberately strange set where the player
+  // has to reason about tradeoffs rather than simply choosing the highest
+  // number.
+  const candidates = shuffle(ITEM_POOL);
 
-function todayKey(): string {
-  return new Date().toDateString();
+  const guaranteedCounter = candidates.find(
+    (item) =>
+      item.element === enemy.weakness ||
+      item.strongAgainst === enemy.element
+  );
+
+  const guaranteedDefense = candidates.find(
+    (item) => item.defense >= 20 || item.health >= 30
+  );
+
+  const weirdChoice = candidates.find(
+    (item) =>
+      item.defense < 0 ||
+      item.health < 0 ||
+      item.speed >= 30
+  );
+
+  const randomChoices = candidates.slice(0, 5);
+
+  const combined = [
+    guaranteedCounter,
+    guaranteedDefense,
+    weirdChoice,
+    ...randomChoices,
+  ].filter(Boolean) as Item[];
+
+  return shuffle(
+    combined.filter(
+      (item, index, arr) => arr.findIndex((x) => x.id === item.id) === index
+    )
+  ).slice(0, 5);
 }
 
-function defaultState(
-  carry?: {
-    personalBest: number;
-    targetBest: number;
+// ============================================================================
+// COMBAT
+// ============================================================================
+
+function calculateBuildStats(
+  items: Item[],
+  levelInfo: LevelInfo
+): BuildStats {
+  const base: BuildStats = {
+    attack: 20,
+    defense: 10,
+    health: 120,
+    speed: 10,
+    crit: 5,
+    lifesteal: 0,
+  };
+
+  for (const item of items) {
+    base.attack += item.attack;
+    base.defense += item.defense;
+    base.health += item.health;
+    base.speed += item.speed;
+    base.crit += item.crit;
+    base.lifesteal += item.lifesteal;
   }
-): GameState {
-  const experiment =
-    EXPERIMENTS[
-      Math.floor(
-        Math.random() *
-          EXPERIMENTS.length
-      )
-    ];
+
+  // Exponential level scaling.
+  base.attack *= levelInfo.powerMultiplier;
+  base.defense *= levelInfo.powerMultiplier;
+  base.health *= levelInfo.powerMultiplier;
+  base.speed *= Math.pow(levelInfo.powerMultiplier, 0.35);
 
   return {
-    lastPlayDate:
-      todayKey(),
-
-    points: 0,
-    discoveries: 0,
-
-    experimentsToday: 0,
-    bestExperimentScore: 0,
-
-    currentExperimentId:
-      experiment.id,
-
-    history: [],
-
-    discoveredResults: [],
-
-    personalBest:
-      carry?.personalBest ??
-      0,
-
-    targetBest:
-      carry?.targetBest ??
-      0,
+    attack: Math.max(1, base.attack),
+    defense: Math.max(0, base.defense),
+    health: Math.max(20, base.health),
+    speed: Math.max(1, base.speed),
+    crit: Math.max(0, base.crit),
+    lifesteal: Math.max(0, base.lifesteal),
   };
 }
 
-function loadState(): GameState {
-  if (
-    typeof window ===
-    "undefined"
-  ) {
-    return defaultState();
+function elementMultiplier(
+  attacker: Element,
+  defender: Element,
+  enemyWeakness?: Element,
+  enemyResistance?: Element
+) {
+  let multiplier = 1;
+
+  if (ELEMENTS[attacker].strongAgainst === defender) {
+    multiplier *= 1.35;
   }
+
+  if (ELEMENTS[attacker].weakAgainst === defender) {
+    multiplier *= 0.72;
+  }
+
+  if (enemyWeakness === attacker) {
+    multiplier *= 1.45;
+  }
+
+  if (enemyResistance === attacker) {
+    multiplier *= 0.62;
+  }
+
+  return multiplier;
+}
+
+function runBattle(
+  build: BuildStats,
+  buildElement: Element,
+  enemy: Enemy
+): { playerWon: boolean; logs: BattleLog[]; turns: number } {
+  let playerHP = build.health;
+  let enemyHP = enemy.health;
+
+  const logs: BattleLog[] = [];
+
+  let turn = 0;
+
+  while (playerHP > 0 && enemyHP > 0 && turn < 80) {
+    turn++;
+
+    const playerFirst = build.speed >= enemy.speed;
+
+    const attacks = playerFirst
+      ? ["player", "enemy"]
+      : ["enemy", "player"];
+
+    for (const attacker of attacks) {
+      if (playerHP <= 0 || enemyHP <= 0) break;
+
+      if (attacker === "player") {
+        if (enemy.trait === "evasive" && Math.random() < 0.16) {
+          logs.push({
+            text: `${enemy.name} vanished before the attack landed.`,
+            type: "bad",
+          });
+          continue;
+        }
+
+        const crit = Math.random() * 100 < build.crit;
+
+        let damage =
+          build.attack *
+          elementMultiplier(
+            buildElement,
+            enemy.element,
+            enemy.weakness,
+            enemy.resistance
+          );
+
+        damage *= crit ? 1.8 : 1;
+
+        damage = Math.max(
+          1,
+          damage - enemy.defense * 0.35
+        );
+
+        enemyHP -= damage;
+
+        if (crit) {
+          logs.push({
+            text: `CRITICAL HIT — ${Math.round(damage)} damage.`,
+            type: "critical",
+          });
+        } else {
+          logs.push({
+            text: `You deal ${Math.round(damage)} damage.`,
+            type: "normal",
+          });
+        }
+
+        if (build.lifesteal > 0) {
+          const heal = damage * (build.lifesteal / 100);
+          playerHP = Math.min(build.health, playerHP + heal);
+        }
+
+        if (enemy.trait === "thorns" && enemyHP > 0) {
+          const thorn = Math.max(1, enemy.defense * 0.22);
+          playerHP -= thorn;
+
+          logs.push({
+            text: `Thorns return ${Math.round(thorn)} damage.`,
+            type: "bad",
+          });
+        }
+      } else {
+        if (Math.random() < build.speed / (build.speed + 220)) {
+          logs.push({
+            text: "You dodged the attack.",
+            type: "good",
+          });
+          continue;
+        }
+
+        let enemyAttack = enemy.attack;
+
+        if (enemy.trait === "berserker") {
+          const missing = 1 - enemyHP / enemy.health;
+          enemyAttack *= 1 + missing * 1.1;
+        }
+
+        if (enemy.trait === "unstable") {
+          enemyAttack *= Math.random() > 0.5 ? 1.5 : 0.65;
+        }
+
+        const crit = Math.random() * 100 < enemy.crit;
+
+        let damage =
+          enemyAttack *
+          elementMultiplier(
+            enemy.element,
+            buildElement
+          );
+
+        damage *= crit ? 1.65 : 1;
+
+        damage = Math.max(
+          1,
+          damage - build.defense * 0.3
+        );
+
+        playerHP -= damage;
+
+        logs.push({
+          text: crit
+            ? `CRITICAL — enemy deals ${Math.round(damage)} damage.`
+            : `Enemy deals ${Math.round(damage)} damage.`,
+          type: crit ? "bad" : "normal",
+        });
+
+        if (enemy.trait === "vampire") {
+          const heal = damage * 0.18;
+          enemyHP = Math.min(enemy.health, enemyHP + heal);
+
+          logs.push({
+            text: `${enemy.name} drains ${Math.round(heal)} health.`,
+            type: "bad",
+          });
+        }
+      }
+    }
+
+    if (enemy.trait === "regenerator" && enemyHP > 0) {
+      const heal = enemy.health * 0.018;
+      enemyHP = Math.min(enemy.health, enemyHP + heal);
+    }
+  }
+
+  return {
+    playerWon: playerHP > 0 && enemyHP <= 0,
+    logs,
+    turns: turn,
+  };
+}
+
+// ============================================================================
+// PERSISTENCE
+// ============================================================================
+
+function defaultGameState(): GameState {
+  return {
+    discovered: [],
+    victories: 0,
+    defeats: 0,
+    bestStreak: 0,
+    currentStreak: 0,
+  };
+}
+
+function loadGameState(): GameState {
+  if (typeof window === "undefined") return defaultGameState();
 
   try {
-    const raw =
-      window.localStorage.getItem(
-        STORAGE_KEY
-      );
+    const raw = localStorage.getItem(STORAGE_KEY);
 
-    if (!raw) {
-      return defaultState();
-    }
-
-    const parsed =
-      JSON.parse(raw) as Partial<GameState>;
-
-    if (
-      parsed.lastPlayDate !==
-      todayKey()
-    ) {
-      return defaultState({
-        personalBest:
-          parsed.personalBest ??
-          0,
-        targetBest:
-          parsed.personalBest ??
-          0,
-      });
-    }
+    if (!raw) return defaultGameState();
 
     return {
-      ...defaultState(),
-      ...parsed,
-      lastPlayDate:
-        todayKey(),
+      ...defaultGameState(),
+      ...JSON.parse(raw),
     };
   } catch {
-    return defaultState();
+    return defaultGameState();
   }
 }
 
-function saveState(
-  state: GameState
-) {
-  if (
-    typeof window ===
-    "undefined"
-  ) {
-    return;
-  }
+function saveGameState(state: GameState) {
+  if (typeof window === "undefined") return;
 
   try {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(state)
-    );
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     // Ignore storage failures.
   }
 }
 
 // ============================================================================
-// FORMATTING
+// FORMAT
 // ============================================================================
 
-function formatPoints(
-  n: number
-): string {
-  if (n < 1000) {
-    return Math.round(n).toString();
-  }
+function formatNumber(n: number) {
+  if (n < 1000) return Math.round(n).toString();
 
-  return new Intl.NumberFormat(
-    "en-US",
-    {
-      notation: "compact",
-      maximumFractionDigits: 2,
-    }
-  ).format(Math.round(n));
-}
-
-function formatCountdown(
-  ms: number
-): string {
-  const totalMinutes =
-    Math.max(
-      0,
-      Math.floor(
-        ms / 60000
-      )
-    );
-
-  const h =
-    Math.floor(
-      totalMinutes / 60
-    );
-
-  const m =
-    totalMinutes % 60;
-
-  return `${h}h ${m
-    .toString()
-    .padStart(2, "0")}m`;
-}
-
-function getExperiment(
-  id: string
-): Experiment {
-  return (
-    EXPERIMENTS.find(
-      (experiment) =>
-        experiment.id === id
-    ) ??
-    EXPERIMENTS[0]
-  );
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(n);
 }
 
 // ============================================================================
-// MAIN
+// MAIN COMPONENT
 // ============================================================================
 
 export default function PhaserShooter({
   lifetimeKills,
   onExit,
 }: PhaserShooterProps) {
-  const [phase, setPhase] =
-    useState<Phase>("menu");
+  const [phase, setPhase] = useState<Phase>("menu");
+  const [gameState, setGameState] = useState<GameState>(() =>
+    defaultGameState()
+  );
 
-  const [state, setState] =
-    useState<GameState>(() =>
-      defaultState()
-    );
+  const [enemy, setEnemy] = useState<Enemy | null>(null);
+  const [choices, setChoices] = useState<Item[]>([]);
+  const [selectedItems, setSelectedItems] = useState<Item[]>([]);
+  const [battleResult, setBattleResult] = useState<{
+    won: boolean;
+    logs: BattleLog[];
+    turns: number;
+  } | null>(null);
 
-  const [hydrated, setHydrated] =
-    useState(false);
+  const [battleLogIndex, setBattleLogIndex] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
+  const [showEnemyDetails, setShowEnemyDetails] = useState(false);
 
-  const [now, setNow] =
-    useState(() =>
-      Date.now()
-    );
+  const levelInfo = useMemo(
+    () => levelFromLifetimeKills(lifetimeKills),
+    [lifetimeKills]
+  );
 
-  const [result, setResult] =
-    useState<Result | null>(
-      null
-    );
+  const buildStats = useMemo(
+    () => calculateBuildStats(selectedItems, levelInfo),
+    [selectedItems, levelInfo]
+  );
 
-  const [thinking, setThinking] =
-    useState(false);
+  const buildElement = useMemo(() => {
+    if (selectedItems.length === 0) return "physical";
 
-  const [revealed, setRevealed] =
-    useState(false);
+    const counts = new Map<Element, number>();
 
-  const resultTimer =
-    useRef<
-      ReturnType<
-        typeof setTimeout
-      > | null
-    >(null);
+    for (const item of selectedItems) {
+      counts.set(item.element, (counts.get(item.element) ?? 0) + 1);
+    }
 
-  const levelInfo =
-    useMemo(
-      () =>
-        levelFromLifetimeKills(
-          lifetimeKills
-        ),
-      [lifetimeKills]
-    );
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  }, [selectedItems]);
 
-  const experiment =
-    useMemo(
-      () =>
-        getExperiment(
-          state.currentExperimentId
-        ),
-      [state.currentExperimentId]
-    );
-
-  // ========================================================================
+  // --------------------------------------------------------------------------
   // LOAD
-  // ========================================================================
+  // --------------------------------------------------------------------------
 
   useEffect(() => {
-    setState(loadState());
+    setGameState(loadGameState());
     setHydrated(true);
   }, []);
-
-  // ========================================================================
-  // SAVE
-  // ========================================================================
 
   useEffect(() => {
     if (!hydrated) return;
 
-    saveState(state);
-  }, [
-    state,
-    hydrated,
-  ]);
+    saveGameState(gameState);
+  }, [gameState, hydrated]);
 
-  // ========================================================================
-  // CLOCK
-  // ========================================================================
+  // --------------------------------------------------------------------------
+  // START A NEW EXPERIMENT
+  // --------------------------------------------------------------------------
 
-  useEffect(() => {
-    const id =
-      setInterval(
-        () =>
-          setNow(
-            Date.now()
-          ),
-        30_000
-      );
+  const startRun = useCallback(() => {
+    const generatedEnemy = generateEnemy(levelInfo.level);
+    const generatedChoices = generateChoices(generatedEnemy);
 
-    return () =>
-      clearInterval(id);
+    setEnemy(generatedEnemy);
+    setChoices(generatedChoices);
+    setSelectedItems([]);
+    setBattleResult(null);
+    setBattleLogIndex(0);
+    setShowEnemyDetails(false);
+
+    setPhase("build");
+  }, [levelInfo.level]);
+
+  // --------------------------------------------------------------------------
+  // SELECT ITEM
+  // --------------------------------------------------------------------------
+
+  const toggleItem = useCallback((item: Item) => {
+    setSelectedItems((prev) => {
+      const exists = prev.some((x) => x.id === item.id);
+
+      if (exists) {
+        return prev.filter((x) => x.id !== item.id);
+      }
+
+      // Four slots.
+      if (prev.length >= 4) {
+        return prev;
+      }
+
+      return [...prev, item];
+    });
   }, []);
 
-  // ========================================================================
-  // DAILY RESET
-  // ========================================================================
+  // --------------------------------------------------------------------------
+  // FIGHT
+  // --------------------------------------------------------------------------
+
+  const fight = useCallback(() => {
+    if (!enemy || selectedItems.length === 0) return;
+
+    const result = runBattle(
+      buildStats,
+      buildElement,
+      enemy
+    );
+
+    setBattleResult({
+      won: result.playerWon,
+      logs: result.logs,
+      turns: result.turns,
+    });
+
+    setBattleLogIndex(0);
+
+    const discoveryKey =
+      `${enemy.element}-${enemy.trait}-${selectedItems
+        .map((x) => x.id)
+        .sort()
+        .join("+")}`;
+
+    setGameState((prev) => {
+      const discovered = prev.discovered.includes(discoveryKey)
+        ? prev.discovered
+        : [...prev.discovered, discoveryKey];
+
+      if (result.playerWon) {
+        const currentStreak = prev.currentStreak + 1;
+
+        return {
+          ...prev,
+          discovered,
+          victories: prev.victories + 1,
+          currentStreak,
+          bestStreak: Math.max(prev.bestStreak, currentStreak),
+        };
+      }
+
+      return {
+        ...prev,
+        discovered,
+        defeats: prev.defeats + 1,
+        currentStreak: 0,
+      };
+    });
+
+    setPhase("result");
+  }, [enemy, selectedItems, buildStats, buildElement]);
+
+  // --------------------------------------------------------------------------
+  // NEXT LOG
+  // --------------------------------------------------------------------------
 
   useEffect(() => {
-    setState(
-      (previous) => {
-        if (
-          previous.lastPlayDate ===
-          todayKey()
-        ) {
-          return previous;
-        }
+    if (phase !== "result" || !battleResult) return;
 
-        return defaultState({
-          personalBest:
-            previous.personalBest,
-          targetBest:
-            previous.personalBest,
-        });
-      }
-    );
-  }, [now]);
+    if (battleLogIndex >= battleResult.logs.length - 1) return;
 
-  // ========================================================================
-  // CLEANUP
-  // ========================================================================
+    const timeout = setTimeout(() => {
+      setBattleLogIndex((x) => x + 1);
+    }, 520);
 
-  useEffect(() => {
-    return () => {
-      if (
-        resultTimer.current
-      ) {
-        clearTimeout(
-          resultTimer.current
-        );
-      }
-    };
-  }, []);
+    return () => clearTimeout(timeout);
+  }, [phase, battleResult, battleLogIndex]);
 
-  // ========================================================================
-  // RESET EXPERIMENT
-  // ========================================================================
-
-  const nextExperiment =
-    useCallback(() => {
-      const available =
-        EXPERIMENTS.filter(
-          (item) =>
-            item.id !==
-            state.currentExperimentId
-        );
-
-      const next =
-        available[
-          Math.floor(
-            Math.random() *
-              available.length
-          )
-        ];
-
-      setResult(null);
-      setRevealed(false);
-
-      setState(
-        (previous) => ({
-          ...previous,
-          currentExperimentId:
-            next.id,
-          history: [],
-        })
-      );
-    }, [
-      state.currentExperimentId,
-    ]);
-
-  // ========================================================================
-  // TRY ACTION
-  // ========================================================================
-
-  const tryAction =
-    useCallback(
-      (actionId: ActionId) => {
-        if (
-          thinking ||
-          revealed
-        ) {
-          return;
-        }
-
-        setThinking(true);
-
-        const generated =
-          generateResult(
-            experiment,
-            actionId,
-            state.history,
-            levelInfo
-          );
-
-        const historyKey =
-          `${experiment.id}:${actionId}:${generated.title}`;
-
-        setState(
-          (previous) => {
-            const newPoints =
-              previous.points +
-              generated.points;
-
-            const personalBest =
-              Math.max(
-                previous.personalBest,
-                newPoints
-              );
-
-            return {
-              ...previous,
-
-              points:
-                newPoints,
-
-              personalBest,
-
-              experimentsToday:
-                previous.experimentsToday +
-                1,
-
-              bestExperimentScore:
-                Math.max(
-                  previous.bestExperimentScore,
-                  generated.points
-                ),
-
-              discoveries:
-                previous.discoveries +
-                (generated.discovered
-                  ? 1
-                  : 0),
-
-              history: [
-                ...previous.history,
-                historyKey,
-              ],
-
-              discoveredResults:
-                generated.discovered
-                  ? [
-                      ...previous.discoveredResults,
-                      historyKey,
-                    ]
-                  : previous.discoveredResults,
-            };
-          }
-        );
-
-        resultTimer.current =
-          setTimeout(
-            () => {
-              setResult(
-                generated
-              );
-              setThinking(false);
-              setRevealed(true);
-            },
-            450 +
-              Math.random() *
-                700
-          );
-      },
-      [
-        thinking,
-        revealed,
-        experiment,
-        state.history,
-        levelInfo,
-      ]
-    );
-
-  // ========================================================================
-  // RESET CURRENT EXPERIMENT
-  // ========================================================================
-
-  const restartExperiment =
-    useCallback(() => {
-      setResult(null);
-      setRevealed(false);
-      setThinking(false);
-
-      setState(
-        (previous) => ({
-          ...previous,
-          history: [],
-        })
-      );
-    }, []);
-
-  // ========================================================================
-  // EXIT
-  // ========================================================================
-
-  const start =
-    useCallback(
-      () =>
-        setPhase(
-          "playing"
-        ),
-      []
-    );
-
-  const back =
-    useCallback(
-      () =>
-        setPhase("menu"),
-      []
-    );
-
-  // ========================================================================
-  // RESET TIMER
-  // ========================================================================
-
-  const msUntilReset =
-    useMemo(() => {
-      const next =
-        new Date();
-
-      next.setHours(
-        24,
-        0,
-        0,
-        0
-      );
-
-      return (
-        next.getTime() -
-        now
-      );
-    }, [now]);
-
-  // ========================================================================
+  // --------------------------------------------------------------------------
   // RENDER
-  // ========================================================================
+  // --------------------------------------------------------------------------
 
   return (
-    <div
-      style={{
-        position:
-          "relative",
-      }}
-    >
+    <div style={{ position: "relative" }}>
       <AnimatePresence mode="wait">
         {phase === "menu" && (
           <motion.div
             key="menu"
-            initial={{
-              opacity: 0,
-            }}
-            animate={{
-              opacity: 1,
-            }}
-            exit={{
-              opacity: 0,
-            }}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
           >
             <MenuScreen
-              levelInfo={
-                levelInfo
-              }
-              state={state}
-              hydrated={
-                hydrated
-              }
-              onStart={start}
+              levelInfo={levelInfo}
+              gameState={gameState}
+              hydrated={hydrated}
+              onStart={startRun}
             />
           </motion.div>
         )}
 
-        {phase === "playing" && (
+        {phase === "build" && enemy && (
           <motion.div
-            key="playing"
-            initial={{
-              opacity: 0,
-            }}
-            animate={{
-              opacity: 1,
-            }}
-            exit={{
-              opacity: 0,
-            }}
+            key="build"
+            initial={{ opacity: 0, x: 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -12 }}
           >
-            {/* ============================================================
-                HEADER
-            ============================================================= */}
-
-            <div
-              style={{
-                display:
-                  "flex",
-                alignItems:
-                  "center",
-                justifyContent:
-                  "space-between",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                style={{
-                  display:
-                    "flex",
-                  alignItems:
-                    "center",
-                  gap: 6,
-                }}
-              >
-                <FlaskConical
-                  size={14}
-                  color={
-                    COLORS.chrome
-                  }
-                />
-
-                <span
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 10,
-                    color:
-                      COLORS.textMuted,
-                  }}
-                >
-                  LAB
-                </span>
-
-                <span
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 9,
-                    color:
-                      COLORS.chrome,
-                  }}
-                >
-                  LV{" "}
-                  {
-                    levelInfo.level
-                  }
-                </span>
-              </div>
-
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  color:
-                    COLORS.textMuted,
-                }}
-              >
-                RESET{" "}
-                {
-                  formatCountdown(
-                    msUntilReset
-                  )
-                }
-              </div>
-
-              <button
-                onClick={back}
-                style={{
-                  width: 30,
-                  height: 30,
-                  display:
-                    "flex",
-                  alignItems:
-                    "center",
-                  justifyContent:
-                    "center",
-                  borderRadius: 5,
-                  border: `1px solid ${COLORS.panelLine}`,
-                  background:
-                    COLORS.panel,
-                  color:
-                    COLORS.text,
-                  cursor:
-                    "pointer",
-                }}
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            {/* ============================================================
-                CURIOSITY HEADER
-            ============================================================= */}
-
-            <div
-              style={{
-                padding:
-                  "17px 16px",
-                borderRadius: 7,
-                background:
-                  COLORS.panel,
-                border: `1px solid ${COLORS.panelLine}`,
-                marginBottom: 10,
-              }}
-            >
-              <div
-                style={{
-                  display:
-                    "flex",
-                  alignItems:
-                    "center",
-                  gap: 7,
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  color:
-                    COLORS.chrome,
-                  letterSpacing:
-                    1.3,
-                }}
-              >
-                <HelpCircle
-                  size={13}
-                />
-
-                YOU DON&apos;T
-                KNOW YET
-              </div>
-
-              <div
-                style={{
-                  fontFamily:
-                    FONT_DISPLAY,
-                  fontSize: 21,
-                  fontWeight: 800,
-                  color:
-                    COLORS.text,
-                  marginTop: 6,
-                }}
-              >
-                {
-                  experiment.title
-                }
-              </div>
-
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 11,
-                  color:
-                    COLORS.textMuted,
-                  marginTop: 6,
-                  lineHeight:
-                    1.5,
-                }}
-              >
-                {
-                  experiment.question
-                }
-              </div>
-            </div>
-
-            {/* ============================================================
-                SCENE
-            ============================================================= */}
-
-            <motion.div
-              key={
-                experiment.id
+            <BuildScreen
+              levelInfo={levelInfo}
+              enemy={enemy}
+              choices={choices}
+              selectedItems={selectedItems}
+              stats={buildStats}
+              buildElement={buildElement}
+              showEnemyDetails={showEnemyDetails}
+              onToggleItem={toggleItem}
+              onShowEnemy={() =>
+                setShowEnemyDetails((x) => !x)
               }
-              initial={{
-                opacity: 0,
-                scale: 0.98,
-              }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-              }}
-              style={{
-                minHeight: 145,
-                padding:
-                  "18px 16px",
-                borderRadius: 7,
-                background:
-                  COLORS.void,
-                border: `1px solid ${COLORS.panelLine}`,
-                marginBottom: 10,
-                display:
-                  "flex",
-                flexDirection:
-                  "column",
-                justifyContent:
-                  "center",
-              }}
-            >
-              <div
-                style={{
-                  fontFamily:
-                    FONT_DISPLAY,
-                  fontSize: 17,
-                  fontWeight: 700,
-                  color:
-                    COLORS.text,
-                  lineHeight:
-                    1.4,
-                }}
-              >
-                {
-                  experiment.object
-                }
-              </div>
+              onFight={fight}
+              onExit={() => setPhase("menu")}
+              onReroll={startRun}
+            />
+          </motion.div>
+        )}
 
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 10,
-                  color:
-                    COLORS.textMuted,
-                  marginTop: 9,
-                  lineHeight:
-                    1.5,
-                }}
-              >
-                {
-                  experiment.atmosphere
-                }
-              </div>
-
-              <div
-                style={{
-                  marginTop: 14,
-                  display:
-                    "flex",
-                  alignItems:
-                    "center",
-                  gap: 6,
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  color:
-                    COLORS.textMuted,
-                }}
-              >
-                <Sparkles
-                  size={11}
-                />
-                There may be
-                more than one
-                answer.
-              </div>
-            </motion.div>
-
-            {/* ============================================================
-                RESULT
-            ============================================================= */}
-
-            <AnimatePresence mode="wait">
-              {thinking && (
-                <motion.div
-                  key="thinking"
-                  initial={{
-                    opacity: 0,
-                  }}
-                  animate={{
-                    opacity: 1,
-                  }}
-                  exit={{
-                    opacity: 0,
-                  }}
-                  style={{
-                    padding:
-                      "18px",
-                    textAlign:
-                      "center",
-                    borderRadius: 7,
-                    background:
-                      COLORS.panel,
-                    border: `1px solid ${COLORS.panelLine}`,
-                    marginBottom: 10,
-                  }}
-                >
-                  <motion.div
-                    animate={{
-                      rotate: 360,
-                    }}
-                    transition={{
-                      duration: 1,
-                      repeat:
-                        Infinity,
-                      ease:
-                        "linear",
-                    }}
-                    style={{
-                      width: 28,
-                      height: 28,
-                      margin:
-                        "0 auto 8px",
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "center",
-                    }}
-                  >
-                    <Shuffle
-                      size={20}
-                      color={
-                        COLORS.chrome
-                      }
-                    />
-                  </motion.div>
-
-                  <div
-                    style={{
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize: 10,
-                      color:
-                        COLORS.textMuted,
-                    }}
-                  >
-                    SEEING WHAT
-                    HAPPENS...
-                  </div>
-                </motion.div>
-              )}
-
-              {result &&
-                revealed && (
-                  <motion.div
-                    key="result"
-                    initial={{
-                      opacity: 0,
-                      y: 10,
-                    }}
-                    animate={{
-                      opacity: 1,
-                      y: 0,
-                    }}
-                    style={{
-                      padding:
-                        "17px 16px",
-                      borderRadius: 7,
-                      background:
-                        COLORS.panel,
-                      border: `1px solid ${
-                        result.rarity ===
-                        "unknown"
-                          ? COLORS.chrome
-                          : COLORS.panelLine
-                      }`,
-                      marginBottom: 10,
-                    }}
-                  >
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        alignItems:
-                          "center",
-                        justifyContent:
-                          "space-between",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 9,
-                          color:
-                            COLORS.chrome,
-                          letterSpacing:
-                            1.2,
-                        }}
-                      >
-                        {
-                          result.rarity.toUpperCase()
-                        }{" "}
-                        RESULT
-                      </div>
-
-                      <div
-                        style={{
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color:
-                            COLORS.chrome,
-                        }}
-                      >
-                        +
-                        {formatPoints(
-                          result.points
-                        )}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        fontFamily:
-                          FONT_DISPLAY,
-                        fontSize: 18,
-                        fontWeight: 800,
-                        color:
-                          COLORS.text,
-                        marginTop: 7,
-                      }}
-                    >
-                      {
-                        result.title
-                      }
-                    </div>
-
-                    <div
-                      style={{
-                        fontFamily:
-                          FONT_MONO,
-                        fontSize: 10.5,
-                        lineHeight:
-                          1.55,
-                        color:
-                          COLORS.textMuted,
-                        marginTop: 6,
-                      }}
-                    >
-                      {
-                        result.text
-                      }
-                    </div>
-
-                    {result.clue && (
-                      <div
-                        style={{
-                          marginTop: 11,
-                          padding:
-                            "9px 10px",
-                          borderRadius: 5,
-                          background:
-                            COLORS.void,
-                          fontFamily:
-                            FONT_MONO,
-                          fontSize: 9,
-                          color:
-                            COLORS.chrome,
-                          lineHeight:
-                            1.5,
-                        }}
-                      >
-                        <Sparkles
-                          size={11}
-                          style={{
-                            verticalAlign:
-                              "middle",
-                            marginRight:
-                              5,
-                          }}
-                        />
-                        {
-                          result.clue
-                        }
-                      </div>
-                    )}
-                  </motion.div>
-                )}
-            </AnimatePresence>
-
-            {/* ============================================================
-                ACTIONS
-            ============================================================= */}
-
-            {!thinking &&
-              !revealed && (
-                <motion.div
-                  key={
-                    experiment.id
-                  }
-                  initial={{
-                    opacity: 0,
-                    y: 8,
-                  }}
-                  animate={{
-                    opacity: 1,
-                    y: 0,
-                  }}
-                  style={{
-                    display:
-                      "flex",
-                    flexDirection:
-                      "column",
-                    gap: 8,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize: 9,
-                      color:
-                        COLORS.textMuted,
-                      textTransform:
-                        "uppercase",
-                      letterSpacing:
-                        1.2,
-                      marginBottom: 2,
-                    }}
-                  >
-                    What do you try?
-                  </div>
-
-                  {experiment.actions.map(
-                    (
-                      action,
-                      index
-                    ) => (
-                      <motion.button
-                        key={
-                          action.id
-                        }
-                        whileTap={{
-                          scale: 0.98,
-                        }}
-                        onClick={() =>
-                          tryAction(
-                            action.id
-                          )
-                        }
-                        style={{
-                          display:
-                            "flex",
-                          alignItems:
-                            "center",
-                          gap: 11,
-                          padding:
-                            "13px 13px",
-                          borderRadius: 6,
-                          border: `1px solid ${COLORS.panelLine}`,
-                          background:
-                            COLORS.panel,
-                          color:
-                            COLORS.text,
-                          textAlign:
-                            "left",
-                          cursor:
-                            "pointer",
-                          width:
-                            "100%",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 34,
-                            height: 34,
-                            borderRadius: 5,
-                            display:
-                              "flex",
-                            alignItems:
-                              "center",
-                            justifyContent:
-                              "center",
-                            background: `${COLORS.chrome}12`,
-                            color:
-                              COLORS.chrome,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {
-                            action.icon
-                          }
-                        </div>
-
-                        <div
-                          style={{
-                            flex: 1,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontFamily:
-                                FONT_DISPLAY,
-                              fontWeight: 700,
-                              fontSize: 13,
-                            }}
-                          >
-                            {
-                              action.label
-                            }
-                          </div>
-
-                          <div
-                            style={{
-                              fontFamily:
-                                FONT_MONO,
-                              fontSize: 9,
-                              color:
-                                COLORS.textMuted,
-                              marginTop: 2,
-                            }}
-                          >
-                            {
-                              action.description
-                            }
-                          </div>
-                        </div>
-
-                        <span
-                          style={{
-                            fontFamily:
-                              FONT_MONO,
-                            fontSize: 9,
-                            color:
-                              COLORS.textMuted,
-                          }}
-                        >
-                          {
-                            index +
-                              1
-                          }
-                        </span>
-                      </motion.button>
-                    )
-                  )}
-                </motion.div>
-              )}
-
-            {/* ============================================================
-                AFTER RESULT
-            ============================================================= */}
-
-            {revealed &&
-              !thinking && (
-                <div
-                  style={{
-                    display:
-                      "flex",
-                    gap: 8,
-                  }}
-                >
-                  <button
-                    onClick={
-                      restartExperiment
-                    }
-                    style={{
-                      flex: 1,
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "center",
-                      gap: 6,
-                      padding:
-                        "12px 0",
-                      borderRadius: 5,
-                      border: `1px solid ${COLORS.panelLine}`,
-                      background:
-                        COLORS.panel,
-                      color:
-                        COLORS.text,
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize: 10,
-                      cursor:
-                        "pointer",
-                    }}
-                  >
-                    <RotateCcw
-                      size={12}
-                    />
-                    TRY AGAIN
-                  </button>
-
-                  <button
-                    onClick={
-                      nextExperiment
-                    }
-                    style={{
-                      flex: 1.5,
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "center",
-                      gap: 6,
-                      padding:
-                        "12px 0",
-                      borderRadius: 5,
-                      border: "none",
-                      background:
-                        COLORS.chrome,
-                      color:
-                        COLORS.void,
-                      fontFamily:
-                        FONT_DISPLAY,
-                      fontWeight: 800,
-                      fontSize: 11,
-                      cursor:
-                        "pointer",
-                    }}
-                  >
-                    WHAT&apos;S NEXT?
-                    <ArrowRight
-                      size={13}
-                    />
-                  </button>
-                </div>
-              )}
-
-            {/* ============================================================
-                SCORE
-            ============================================================= */}
-
-            <div
-              style={{
-                display:
-                  "flex",
-                justifyContent:
-                  "space-between",
-                marginTop: 14,
-                paddingTop: 12,
-                borderTop: `1px solid ${COLORS.panelLine}`,
-                fontFamily:
-                  FONT_MONO,
-                fontSize: 9,
-                color:
-                  COLORS.textMuted,
-              }}
-            >
-              <span>
-                {formatPoints(
-                  state.points
-                )}{" "}
-                points
-              </span>
-
-              <span>
-                {
-                  state.discoveries
-                }{" "}
-                discoveries
-              </span>
-
-              <span>
-                {
-                  state.experimentsToday
-                }{" "}
-                experiments
-              </span>
-            </div>
+        {phase === "result" && enemy && battleResult && (
+          <motion.div
+            key="result"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <ResultScreen
+              enemy={enemy}
+              result={battleResult}
+              logIndex={battleLogIndex}
+              gameState={gameState}
+              onAgain={startRun}
+              onMenu={() => setPhase("menu")}
+            />
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ======================================================================
-          EXIT
-      ======================================================================= */}
-
-      {phase ===
-        "menu" && (
+      {phase !== "menu" && (
         <button
-          onClick={
-            onExit
-          }
+          onClick={() => setPhase("menu")}
           style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
+            display: "flex",
+            alignItems: "center",
             gap: 6,
-            margin:
-              "18px auto 0",
-            padding:
-              "8px 4px",
-            background:
-              "transparent",
-            border:
-              "none",
-            color:
-              COLORS.textMuted,
-            fontFamily:
-              FONT_MONO,
-            fontSize:
-              10.5,
-            textTransform:
-              "uppercase",
-            letterSpacing:
-              1,
-            cursor:
-              "pointer",
+            margin: "18px auto 0",
+            padding: "8px 4px",
+            background: "transparent",
+            border: "none",
+            color: COLORS.textMuted,
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            cursor: "pointer",
+          }}
+        >
+          <X size={12} />
+          Back
+        </button>
+      )}
+
+      {phase === "menu" && (
+        <button
+          onClick={onExit}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            margin: "18px auto 0",
+            padding: "8px 4px",
+            background: "transparent",
+            border: "none",
+            color: COLORS.textMuted,
+            fontFamily: FONT_MONO,
+            fontSize: 10.5,
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            cursor: "pointer",
           }}
         >
           <X size={12} />
@@ -2002,430 +1154,1054 @@ export default function PhaserShooter({
 
 function MenuScreen({
   levelInfo,
-  state,
+  gameState,
   hydrated,
   onStart,
 }: {
   levelInfo: LevelInfo;
-  state: GameState;
+  gameState: GameState;
   hydrated: boolean;
   onStart: () => void;
 }) {
+  const xpPct =
+    levelInfo.xpIntoLevel / levelInfo.xpForNextLevel;
+
   return (
     <div>
-      {/* LEVEL */}
-
       <div
         style={{
-          padding:
-            "17px 16px",
-          borderRadius: 7,
-          background:
-            COLORS.panel,
+          padding: 18,
+          borderRadius: 8,
+          background: COLORS.panel,
           border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 10,
+          marginBottom: 12,
         }}
       >
         <div
           style={{
-            display:
-              "flex",
-            justifyContent:
-              "space-between",
-            alignItems:
-              "center",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
           }}
         >
           <div
             style={{
-              display:
-                "flex",
-              alignItems:
-                "center",
+              display: "flex",
+              alignItems: "center",
               gap: 8,
             }}
           >
-            <Zap
-              size={16}
-              color={
-                COLORS.chrome
-              }
-            />
+            <Sparkles size={17} color={COLORS.chrome} />
 
             <span
               style={{
-                fontFamily:
-                  FONT_DISPLAY,
-                fontSize: 15,
-                fontWeight: 800,
-                color:
-                  COLORS.text,
+                fontFamily: FONT_DISPLAY,
+                fontWeight: 700,
+                fontSize: 16,
               }}
             >
-              LEVEL{" "}
-              {
-                levelInfo.level
-              }
+              Level {levelInfo.level}
             </span>
           </div>
 
           <span
             style={{
-              fontFamily:
-                FONT_MONO,
-              fontSize: 10,
-              color:
-                COLORS.chrome,
-              fontWeight: 700,
-            }}
-          >
-            {
-              levelInfo.multiplier.toFixed(
-                2
-              )
-            }
-            ×
-          </span>
-        </div>
-
-        <div
-          style={{
-            height: 6,
-            borderRadius: 3,
-            background:
-              COLORS.void,
-            marginTop: 9,
-            overflow:
-              "hidden",
-          }}
-        >
-          <div
-            style={{
-              height:
-                "100%",
-              width: `${
-                levelInfo.progressPct *
-                100
-              }%`,
-              background:
-                COLORS.chrome,
-            }}
-          />
-        </div>
-
-        <div
-          style={{
-            display:
-              "flex",
-            justifyContent:
-              "space-between",
-            marginTop: 5,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 8.5,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          <span>
-            {
-              levelInfo.xpIntoLevel
-            }{" "}
-            /{" "}
-            {
-              levelInfo.xpForNextLevel
-            }
-          </span>
-
-          <span>
-            2 days / level
-          </span>
-        </div>
-      </div>
-
-      {/* CURIOSITY */}
-
-      <div
-        style={{
-          padding:
-            "18px 16px",
-          borderRadius: 7,
-          background:
-            COLORS.panel,
-          border: `1px solid ${COLORS.chrome}44`,
-          marginBottom: 10,
-        }}
-      >
-        <div
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap: 8,
-          }}
-        >
-          <Sparkles
-            size={18}
-            color={
-              COLORS.chrome
-            }
-          />
-
-          <span
-            style={{
-              fontFamily:
-                FONT_DISPLAY,
-              fontSize: 16,
-              fontWeight: 800,
-              color:
-                COLORS.text,
-            }}
-          >
-            I WONDER...
-          </span>
-        </div>
-
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              COLORS.textMuted,
-            lineHeight:
-              1.6,
-            marginTop: 8,
-          }}
-        >
-          Every experiment can
-          behave differently.
-          <br />
-          There is no obvious
-          correct button.
-          <br />
-          Try something and find
-          out.
-        </div>
-      </div>
-
-      {/* UNKNOWN PREVIEW */}
-
-      <div
-        style={{
-          display:
-            "flex",
-          alignItems:
-            "center",
-          gap: 11,
-          padding:
-            "13px",
-          borderRadius: 6,
-          background:
-            COLORS.void,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 10,
-        }}
-      >
-        <div
-          style={{
-            width: 35,
-            height: 35,
-            borderRadius: 5,
-            display:
-              "flex",
-            alignItems:
-              "center",
-            justifyContent:
-              "center",
-            background: `${COLORS.chrome}12`,
-          }}
-        >
-          <Lock
-            size={16}
-            color={
-              COLORS.chrome
-            }
-          />
-        </div>
-
-        <div
-          style={{
-            flex: 1,
-          }}
-        >
-          <div
-            style={{
-              fontFamily:
-                FONT_MONO,
+              fontFamily: FONT_MONO,
               fontSize: 9,
-              color:
-                COLORS.textMuted,
+              color: COLORS.textMuted,
             }}
           >
-            NEXT RESULT
-          </div>
-
-          <div
-            style={{
-              fontFamily:
-                FONT_DISPLAY,
-              fontSize: 13,
-              fontWeight: 800,
-              color:
-                COLORS.chrome,
-              marginTop: 3,
-            }}
-          >
-            ???
-          </div>
+            {levelInfo.xpIntoLevel} / {levelInfo.xpForNextLevel}
+          </span>
         </div>
 
-        <Shuffle
-          size={15}
-          color={
-            COLORS.textMuted
-          }
-        />
-      </div>
+        <div
+          style={{
+            height: 5,
+            marginTop: 10,
+            borderRadius: 4,
+            overflow: "hidden",
+            background: COLORS.void,
+          }}
+        >
+          <div
+            style={{
+              width: `${xpPct * 100}%`,
+              height: "100%",
+              background: COLORS.chrome,
+            }}
+          />
+        </div>
 
-      {/* STATS */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginTop: 12,
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: COLORS.textMuted,
+          }}
+        >
+          <span>COMBAT POWER</span>
+
+          <span style={{ color: COLORS.chrome }}>
+            ×{levelInfo.powerMultiplier.toFixed(2)}
+          </span>
+        </div>
+      </div>
 
       <div
         style={{
-          display:
-            "grid",
-          gridTemplateColumns:
-            "1fr 1fr 1fr",
-          gap: 7,
-          marginBottom: 10,
+          padding: 16,
+          borderRadius: 8,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 12,
         }}
       >
-        <MiniStat
-          icon={
-            <Trophy
-              size={14}
-            />
-          }
-          value={
-            state.personalBest
-              ? formatPoints(
-                  state.personalBest
-                )
-              : "—"
-          }
-          label="BEST"
-        />
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 15,
+          }}
+        >
+          <Brain size={17} color={COLORS.chrome} />
+          UNKNOWN ENCOUNTER
+        </div>
 
-        <MiniStat
-          icon={
-            <Star size={14} />
-          }
-          value={String(
-            state.discoveries
-          )}
-          label="FOUND"
-        />
+        <p
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10.5,
+            lineHeight: 1.6,
+            color: COLORS.textMuted,
+            margin: "10px 0 0",
+          }}
+        >
+          Every run creates a different enemy, trait,
+          weakness and set of equipment.
+        </p>
 
-        <MiniStat
-          icon={
-            <FlaskConical
-              size={14}
-            />
-          }
-          value={String(
-            state.experimentsToday
-          )}
-          label="TRIED"
-        />
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginTop: 14,
+            flexWrap: "wrap",
+          }}
+        >
+          <Tag icon={<Eye size={11} />} text="Unknown enemy" />
+          <Tag icon={<Crosshair size={11} />} text="Find weakness" />
+          <Tag icon={<Swords size={11} />} text="Build counter" />
+          <Tag icon={<Sparkles size={11} />} text="Unexpected result" />
+        </div>
       </div>
 
-      {/* START */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 8,
+          marginBottom: 14,
+        }}
+      >
+        <StatMini
+          icon={<Trophy size={13} />}
+          label="Wins"
+          value={gameState.victories}
+        />
+
+        <StatMini
+          icon={<Skull size={13} />}
+          label="Losses"
+          value={gameState.defeats}
+        />
+
+        <StatMini
+          icon={<Sparkles size={13} />}
+          label="Discoveries"
+          value={gameState.discovered.length}
+        />
+      </div>
 
       <button
-        onClick={
-          onStart
-        }
-        disabled={
-          !hydrated
-        }
+        onClick={onStart}
+        disabled={!hydrated}
         style={{
-          width:
-            "100%",
-          display:
-            "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
-          gap: 8,
-          padding:
-            "14px 0",
-          borderRadius: 5,
+          width: "100%",
+          padding: "14px 0",
           border: "none",
-          background:
-            COLORS.chrome,
-          color:
-            COLORS.void,
-          fontFamily:
-            FONT_DISPLAY,
+          borderRadius: 5,
+          background: COLORS.chrome,
+          color: COLORS.void,
+          fontFamily: FONT_DISPLAY,
+          fontWeight: 700,
           fontSize: 13,
-          fontWeight: 800,
-          letterSpacing:
-            0.8,
-          cursor:
-            hydrated
-              ? "pointer"
-              : "default",
-          opacity:
-            hydrated
-              ? 1
-              : 0.6,
+          cursor: hydrated ? "pointer" : "default",
+          opacity: hydrated ? 1 : 0.6,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
         }}
       >
-        <Play
-          size={14}
-        />
-        ENTER THE UNKNOWN
+        <Play size={14} />
+        DISCOVER WHAT&apos;S NEXT
       </button>
     </div>
   );
 }
 
 // ============================================================================
-// MINI STAT
+// BUILD SCREEN
 // ============================================================================
 
-function MiniStat({
-  icon,
-  value,
-  label,
+function BuildScreen({
+  levelInfo,
+  enemy,
+  choices,
+  selectedItems,
+  stats,
+  buildElement,
+  showEnemyDetails,
+  onToggleItem,
+  onShowEnemy,
+  onFight,
+  onExit,
+  onReroll,
 }: {
-  icon: ReactNode;
-  value: string;
-  label: string;
+  levelInfo: LevelInfo;
+  enemy: Enemy;
+  choices: Item[];
+  selectedItems: Item[];
+  stats: BuildStats;
+  buildElement: Element;
+  showEnemyDetails: boolean;
+  onToggleItem: (item: Item) => void;
+  onShowEnemy: () => void;
+  onFight: () => void;
+  onExit: () => void;
+  onReroll: () => void;
 }) {
   return (
-    <div
+    <div>
+      {/* ENEMY */}
+      <div
+        style={{
+          padding: 15,
+          borderRadius: 8,
+          background: COLORS.panel,
+          border: `1px solid ${ELEMENTS[enemy.element].color}55`,
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <div
+            style={{
+              width: 54,
+              height: 54,
+              borderRadius: 10,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: `${ELEMENTS[enemy.element].color}16`,
+              fontSize: 30,
+            }}
+          >
+            {enemy.icon}
+          </div>
+
+          <div style={{ flex: 1 }}>
+            <div
+              style={{
+                fontFamily: FONT_DISPLAY,
+                fontWeight: 700,
+                fontSize: 16,
+              }}
+            >
+              {enemy.name}
+            </div>
+
+            <div
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 9,
+                color: COLORS.textMuted,
+                marginTop: 3,
+              }}
+            >
+              {enemy.title}
+            </div>
+
+            <div
+              style={{
+                marginTop: 7,
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                color: ELEMENTS[enemy.element].color,
+              }}
+            >
+              {ELEMENTS[enemy.element].icon}{" "}
+              {ELEMENTS[enemy.element].label}
+            </div>
+          </div>
+
+          <button
+            onClick={onShowEnemy}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 6,
+              border: `1px solid ${COLORS.panelLine}`,
+              background: COLORS.void,
+              color: COLORS.text,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
+          >
+            <Eye size={14} />
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {showEnemyDetails && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              style={{
+                overflow: "hidden",
+                marginTop: 12,
+                paddingTop: 12,
+                borderTop: `1px solid ${COLORS.panelLine}`,
+              }}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 7,
+                }}
+              >
+                <EnemyFact
+                  label="Trait"
+                  value={enemy.trait}
+                />
+
+                <EnemyFact
+                  label="Weakness"
+                  value={`${ELEMENTS[enemy.weakness].icon} ${ELEMENTS[enemy.weakness].label}`}
+                  good
+                />
+
+                <EnemyFact
+                  label="Resistance"
+                  value={`${ELEMENTS[enemy.resistance].icon} ${ELEMENTS[enemy.resistance].label}`}
+                />
+
+                <EnemyFact
+                  label="Behavior"
+                  value={enemy.description}
+                />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* BUILD HEADER */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 9,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            letterSpacing: 1.2,
+            color: COLORS.textMuted,
+            textTransform: "uppercase",
+          }}
+        >
+          Choose your experiment
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: COLORS.chrome,
+          }}
+        >
+          {selectedItems.length}/4 equipped
+        </div>
+      </div>
+
+      {/* ITEMS */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 7,
+        }}
+      >
+        {choices.map((item) => {
+          const selected = selectedItems.some(
+            (x) => x.id === item.id
+          );
+
+          return (
+            <ItemCard
+              key={item.id}
+              item={item}
+              selected={selected}
+              onClick={() => onToggleItem(item)}
+            />
+          );
+        })}
+      </div>
+
+      {/* BUILD STATS */}
+      <div
+        style={{
+          marginTop: 12,
+          padding: 12,
+          borderRadius: 7,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 9,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 12,
+            }}
+          >
+            Your build
+          </span>
+
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: ELEMENTS[buildElement].color,
+            }}
+          >
+            {ELEMENTS[buildElement].icon}{" "}
+            {ELEMENTS[buildElement].label}
+          </span>
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, 1fr)",
+            gap: 6,
+          }}
+        >
+          <CombatStat
+            icon={<Sword size={12} />}
+            label="ATK"
+            value={stats.attack}
+          />
+
+          <CombatStat
+            icon={<Shield size={12} />}
+            label="DEF"
+            value={stats.defense}
+          />
+
+          <CombatStat
+            icon={<Heart size={12} />}
+            label="HP"
+            value={stats.health}
+          />
+
+          <CombatStat
+            icon={<Zap size={12} />}
+            label="SPD"
+            value={stats.speed}
+          />
+
+          <CombatStat
+            icon={<Crosshair size={12} />}
+            label="CRIT"
+            value={`${Math.round(stats.crit)}%`}
+          />
+
+          <CombatStat
+            icon={<Flame size={12} />}
+            label="DRAIN"
+            value={`${Math.round(stats.lifesteal)}%`}
+          />
+        </div>
+      </div>
+
+      {/* ACTIONS */}
+      <div
+        style={{
+          display: "flex",
+          gap: 7,
+          marginTop: 12,
+        }}
+      >
+        <button
+          onClick={onReroll}
+          style={{
+            width: 42,
+            borderRadius: 5,
+            border: `1px solid ${COLORS.panelLine}`,
+            background: COLORS.panel,
+            color: COLORS.textMuted,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+          }}
+          title="Generate another encounter"
+        >
+          <RefreshCw size={14} />
+        </button>
+
+        <button
+          onClick={onFight}
+          disabled={selectedItems.length === 0}
+          style={{
+            flex: 1,
+            padding: "13px 0",
+            border: "none",
+            borderRadius: 5,
+            background:
+              selectedItems.length > 0
+                ? COLORS.chrome
+                : COLORS.panelLine,
+            color:
+              selectedItems.length > 0
+                ? COLORS.void
+                : COLORS.textMuted,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 13,
+            cursor:
+              selectedItems.length > 0
+                ? "pointer"
+                : "not-allowed",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+          }}
+        >
+          <Swords size={15} />
+          FIGHT
+          <ChevronRight size={14} />
+        </button>
+      </div>
+
+      <button
+        onClick={onExit}
+        style={{
+          width: "100%",
+          marginTop: 8,
+          padding: "8px 0",
+          background: "transparent",
+          border: "none",
+          color: COLORS.textMuted,
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          cursor: "pointer",
+        }}
+      >
+        Abandon experiment
+      </button>
+    </div>
+  );
+}
+
+// ============================================================================
+// RESULT
+// ============================================================================
+
+function ResultScreen({
+  enemy,
+  result,
+  logIndex,
+  gameState,
+  onAgain,
+  onMenu,
+}: {
+  enemy: Enemy;
+  result: {
+    won: boolean;
+    logs: BattleLog[];
+    turns: number;
+  };
+  logIndex: number;
+  gameState: GameState;
+  onAgain: () => void;
+  onMenu: () => void;
+}) {
+  const visibleLogs = result.logs.slice(
+    0,
+    Math.min(logIndex + 1, result.logs.length)
+  );
+
+  return (
+    <div>
+      <motion.div
+        initial={{ scale: 0.92, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        style={{
+          textAlign: "center",
+          padding: "22px 12px",
+          borderRadius: 8,
+          background: COLORS.panel,
+          border: `1px solid ${
+            result.won ? "#7fd48a55" : "#ff795f55"
+          }`,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 42,
+            marginBottom: 8,
+          }}
+        >
+          {result.won ? "🏆" : "💥"}
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 20,
+            color: result.won ? "#7fd48a" : "#ff795f",
+          }}
+        >
+          {result.won ? "YOU WON" : "YOU LOST"}
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: COLORS.textMuted,
+            marginTop: 5,
+          }}
+        >
+          {result.turns} turns against {enemy.name}
+        </div>
+      </motion.div>
+
+      {/* BATTLE LOG */}
+      <div
+        style={{
+          marginTop: 12,
+          padding: 13,
+          borderRadius: 8,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          minHeight: 155,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            textTransform: "uppercase",
+            letterSpacing: 1.2,
+            color: COLORS.textMuted,
+            marginBottom: 9,
+          }}
+        >
+          Battle discovery
+        </div>
+
+        <AnimatePresence initial={false}>
+          {visibleLogs.slice(-7).map((log, index) => (
+            <motion.div
+              key={`${logIndex}-${index}-${log.text}`}
+              initial={{ opacity: 0, x: -5 }}
+              animate={{ opacity: 1, x: 0 }}
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 9.5,
+                lineHeight: 1.55,
+                padding: "4px 0",
+                color:
+                  log.type === "critical"
+                    ? "#e5c75f"
+                    : log.type === "good"
+                    ? "#7fd48a"
+                    : log.type === "bad"
+                    ? "#ff795f"
+                    : COLORS.textMuted,
+              }}
+            >
+              {log.text}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* RESULT INSIGHT */}
+      <div
+        style={{
+          marginTop: 10,
+          padding: 13,
+          borderRadius: 7,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 12,
+          }}
+        >
+          <Brain size={14} color={COLORS.chrome} />
+          WHAT DID YOU LEARN?
+        </div>
+
+        <div
+          style={{
+            marginTop: 8,
+            fontFamily: FONT_MONO,
+            fontSize: 9.5,
+            color: COLORS.textMuted,
+            lineHeight: 1.6,
+          }}
+        >
+          {result.won
+            ? "That combination worked. But was it the best possible combination? The next enemy may completely change the answer."
+            : "Your build failed this matchup. Change one variable, try a different counter, and see what changes."}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 8,
+          marginTop: 10,
+        }}
+      >
+        <button
+          onClick={onAgain}
+          style={{
+            padding: "13px 0",
+            borderRadius: 5,
+            border: "none",
+            background: COLORS.chrome,
+            color: COLORS.void,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 11,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+          }}
+        >
+          <RotateCcw size={13} />
+          TRY SOMETHING ELSE
+        </button>
+
+        <button
+          onClick={onMenu}
+          style={{
+            padding: "13px 0",
+            borderRadius: 5,
+            border: `1px solid ${COLORS.panelLine}`,
+            background: COLORS.panel,
+            color: COLORS.text,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          MENU
+        </button>
+      </div>
+
+      <div
+        style={{
+          textAlign: "center",
+          marginTop: 10,
+          fontFamily: FONT_MONO,
+          fontSize: 8.5,
+          color: COLORS.textMuted,
+        }}
+      >
+        {gameState.victories} wins · {gameState.defeats} losses ·{" "}
+        {gameState.discovered.length} discoveries
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// ITEM CARD
+// ============================================================================
+
+function ItemCard({
+  item,
+  selected,
+  onClick,
+}: {
+  item: Item;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const element = ELEMENTS[item.element];
+
+  return (
+    <motion.button
+      whileTap={{ scale: 0.985 }}
+      onClick={onClick}
       style={{
-        padding:
-          "10px 8px",
-        borderRadius: 6,
-        background:
-          COLORS.panel,
-        border: `1px solid ${COLORS.panelLine}`,
-        textAlign:
-          "center",
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "11px 12px",
+        borderRadius: 7,
+        border: `1px solid ${
+          selected ? element.color : COLORS.panelLine
+        }`,
+        background: selected
+          ? `${element.color}12`
+          : COLORS.panel,
+        textAlign: "left",
+        cursor: "pointer",
+        opacity: selected ? 1 : 0.92,
       }}
     >
       <div
         style={{
-          color:
-            COLORS.chrome,
-          display:
-            "flex",
-          justifyContent:
-            "center",
+          width: 38,
+          height: 38,
+          borderRadius: 7,
+          background: `${element.color}15`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 20,
+          flexShrink: 0,
+        }}
+      >
+        {item.icon}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 12,
+              color: COLORS.text,
+            }}
+          >
+            {item.name}
+          </span>
+
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 7.5,
+              textTransform: "uppercase",
+              color: element.color,
+            }}
+          >
+            {item.rarity}
+          </span>
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 8.5,
+            lineHeight: 1.4,
+            color: COLORS.textMuted,
+            marginTop: 3,
+          }}
+        >
+          {item.description}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginTop: 5,
+            flexWrap: "wrap",
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+          }}
+        >
+          {item.attack !== 0 && (
+            <span>
+              ⚔ {item.attack > 0 ? "+" : ""}
+              {item.attack}
+            </span>
+          )}
+
+          {item.defense !== 0 && (
+            <span>
+              🛡 {item.defense > 0 ? "+" : ""}
+              {item.defense}
+            </span>
+          )}
+
+          {item.health !== 0 && (
+            <span>
+              ♥ {item.health > 0 ? "+" : ""}
+              {item.health}
+            </span>
+          )}
+
+          {item.speed !== 0 && (
+            <span>
+              ⚡ {item.speed > 0 ? "+" : ""}
+              {item.speed}
+            </span>
+          )}
+
+          {item.crit > 0 && (
+            <span>
+              ✦ +{item.crit}%
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          border: `1px solid ${
+            selected ? element.color : COLORS.panelLine
+          }`,
+          background: selected ? element.color : "transparent",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        {selected && (
+          <span
+            style={{
+              color: COLORS.void,
+              fontSize: 11,
+              fontWeight: 900,
+            }}
+          >
+            ✓
+          </span>
+        )}
+      </div>
+    </motion.button>
+  );
+}
+
+// ============================================================================
+// SMALL COMPONENTS
+// ============================================================================
+
+function Tag({
+  icon,
+  text,
+}: {
+  icon: React.ReactNode;
+  text: string;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "5px 7px",
+        borderRadius: 4,
+        background: COLORS.void,
+        border: `1px solid ${COLORS.panelLine}`,
+        fontFamily: FONT_MONO,
+        fontSize: 8,
+        color: COLORS.textMuted,
+      }}
+    >
+      {icon}
+      {text}
+    </div>
+  );
+}
+
+function StatMini({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+}) {
+  return (
+    <div
+      style={{
+        padding: "10px 5px",
+        textAlign: "center",
+        borderRadius: 6,
+        background: COLORS.panel,
+        border: `1px solid ${COLORS.panelLine}`,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          color: COLORS.chrome,
         }}
       >
         {icon}
@@ -2433,13 +2209,10 @@ function MiniStat({
 
       <div
         style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 13,
-          fontWeight: 800,
-          color:
-            COLORS.text,
-          marginTop: 4,
+          fontFamily: FONT_DISPLAY,
+          fontWeight: 700,
+          fontSize: 14,
+          marginTop: 3,
         }}
       >
         {value}
@@ -2447,14 +2220,101 @@ function MiniStat({
 
       <div
         style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 7,
-          color:
-            COLORS.textMuted,
+          fontFamily: FONT_MONO,
+          fontSize: 7.5,
+          color: COLORS.textMuted,
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function EnemyFact({
+  label,
+  value,
+  good,
+}: {
+  label: string;
+  value: string;
+  good?: boolean;
+}) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 7.5,
+          textTransform: "uppercase",
+          color: COLORS.textMuted,
+        }}
+      >
+        {label}
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          marginTop: 3,
+          color: good ? "#7fd48a" : COLORS.text,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function CombatStat({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number | string;
+}) {
+  return (
+    <div
+      style={{
+        padding: "7px 6px",
+        borderRadius: 5,
+        background: COLORS.void,
+        border: `1px solid ${COLORS.panelLine}`,
+        textAlign: "center",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          color: COLORS.chrome,
+        }}
+      >
+        {icon}
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          fontWeight: 700,
           marginTop: 2,
-          letterSpacing:
-            0.5,
+        }}
+      >
+        {typeof value === "number"
+          ? formatNumber(value)
+          : value}
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 7,
+          color: COLORS.textMuted,
         }}
       >
         {label}
