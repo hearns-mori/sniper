@@ -14,14 +14,16 @@ import {
   Play,
   Zap,
   Trophy,
-  Target,
   Sparkles,
-  Flame,
+  HelpCircle,
+  FlaskConical,
   Lock,
-  Gift,
-  ChevronRight,
-  MousePointerClick,
+  Eye,
   RotateCcw,
+  ArrowRight,
+  Star,
+  Shuffle,
+  Search,
 } from "lucide-react";
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
@@ -29,160 +31,21 @@ import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
 type Phase = "menu" | "playing";
 
 interface PhaserShooterProps {
-  /** Lifetime kills across all productivity categories — powers the level. */
   lifetimeKills: number;
   onExit: () => void;
 }
 
 // ============================================================================
-// PERSISTED STATE
-// ============================================================================
-
-interface Milestones {
-  m50: boolean;
-  m75: boolean;
-  m100: boolean;
-}
-
-interface TapGameState {
-  lastPlayDate: string;
-
-  // Daily economy
-  balance: number;
-  scoreToday: number;
-
-  // Daily upgrades
-  tapLevel: number;
-  perSecondLevel: number;
-
-  // Lifetime record
-  personalBest: number;
-  targetBest: number;
-
-  // Daily progression
-  milestonesToday: Milestones;
-
-  // Addictive run loop
-  combo: number;
-  bestCombo: number;
-  totalTapsToday: number;
-  criticalHitsToday: number;
-  challengesCompletedToday: number;
-
-  // Current challenge
-  challengeId: number;
-  challengeProgress: number;
-  challengeTarget: number;
-  challengeCompleted: boolean;
-
-  // Mystery progression
-  mysteryIndex: number;
-}
-
-const STORAGE_KEY = "tapgame_state_v2";
-
-function todayKey(): string {
-  return new Date().toDateString();
-}
-
-function defaultState(
-  carry?: {
-    personalBest: number;
-    targetBest: number;
-  }
-): TapGameState {
-  return {
-    lastPlayDate: todayKey(),
-
-    balance: 0,
-    scoreToday: 0,
-
-    tapLevel: 0,
-    perSecondLevel: 0,
-
-    personalBest: carry?.personalBest ?? 0,
-    targetBest: carry?.targetBest ?? 0,
-
-    milestonesToday: {
-      m50: false,
-      m75: false,
-      m100: false,
-    },
-
-    combo: 0,
-    bestCombo: 0,
-    totalTapsToday: 0,
-    criticalHitsToday: 0,
-    challengesCompletedToday: 0,
-
-    challengeId: randomChallengeId(),
-    challengeProgress: 0,
-    challengeTarget: 10,
-    challengeCompleted: false,
-
-    mysteryIndex: 0,
-  };
-}
-
-function loadState(): TapGameState {
-  if (typeof window === "undefined") return defaultState();
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) {
-      return defaultState();
-    }
-
-    const parsed = JSON.parse(raw) as Partial<TapGameState>;
-
-    if (parsed.lastPlayDate !== todayKey()) {
-      return defaultState({
-        personalBest: parsed.personalBest ?? 0,
-        targetBest: parsed.personalBest ?? 0,
-      });
-    }
-
-    return {
-      ...defaultState(),
-      ...parsed,
-      lastPlayDate: todayKey(),
-    };
-  } catch {
-    return defaultState();
-  }
-}
-
-function saveState(state: TapGameState) {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Ignore storage failures.
-  }
-}
-
-// ============================================================================
-// LEVEL SYSTEM
+// LEVEL
 // ============================================================================
 //
-// 521 lifetime kills = 1 productivity level.
+// 521 lifetime kills = 1 level.
+// 1 level = 2 days of productivity.
 //
-// The important change:
-// EACH LEVEL represents roughly TWO DAYS of productivity work.
+// The level does NOT dictate the exact answer.
+// It increases the size of the possibility space.
 //
-// The benefit is exponential:
-//
-// Level 1  = 1.00x
-// Level 2  = 1.32x
-// Level 3  = 1.74x
-// Level 4  = 2.29x
-// Level 5  = 3.01x
-// Level 10 = 18.79x
-// Level 20 = 352.70x
-//
-// This means productivity progress compounds instead of merely adding.
+// More productivity = more powerful experiments.
 //
 // ============================================================================
 
@@ -195,327 +58,744 @@ interface LevelInfo {
   xpForNextLevel: number;
   progressPct: number;
   multiplier: number;
-  nextMultiplier: number;
-  totalProductivityDays: number;
 }
 
-function xpForLevel(_level: number): number {
-  return KILLS_PER_LEVEL;
-}
+function levelFromLifetimeKills(
+  lifetimeKills: number
+): LevelInfo {
+  const kills = Math.max(
+    0,
+    Math.floor(lifetimeKills)
+  );
 
-function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
-  const safeKills = Math.max(0, Math.floor(lifetimeKills));
+  const level =
+    Math.floor(
+      kills / KILLS_PER_LEVEL
+    ) + 1;
 
-  const level = Math.floor(safeKills / KILLS_PER_LEVEL) + 1;
-  const xpIntoLevel = safeKills % KILLS_PER_LEVEL;
-  const xpForNextLevel = KILLS_PER_LEVEL;
+  const xpIntoLevel =
+    kills % KILLS_PER_LEVEL;
 
-  const multiplier = Math.pow(LEVEL_GROWTH, level - 1);
-  const nextMultiplier = Math.pow(LEVEL_GROWTH, level);
+  const multiplier = Math.pow(
+    LEVEL_GROWTH,
+    level - 1
+  );
 
   return {
     level,
     xpIntoLevel,
-    xpForNextLevel,
-    progressPct: xpIntoLevel / xpForNextLevel,
+    xpForNextLevel:
+      KILLS_PER_LEVEL,
+    progressPct:
+      xpIntoLevel /
+      KILLS_PER_LEVEL,
     multiplier,
-    nextMultiplier,
-    totalProductivityDays: (level - 1) * 2,
   };
 }
 
 // ============================================================================
-// CHALLENGE SYSTEM
-// ============================================================================
-//
-// This is the "I wonder if I can..." loop.
-//
-// Instead of only asking the user to tap:
-//
-// "I wonder if I can get 20 taps."
-// "I wonder if I can hit 5 criticals."
-// "I wonder if I can build a 15 combo."
-//
-// Completing one immediately reveals the next challenge.
-//
+// TYPES
 // ============================================================================
 
-interface Challenge {
-  id: number;
-  title: string;
-  subtitle: string;
-  icon: "tap" | "combo" | "critical" | "score";
-  target: number;
-  rewardMultiplier: number;
+type ActionId =
+  | "inspect"
+  | "touch"
+  | "wait"
+  | "combine"
+  | "reverse"
+  | "remove"
+  | "repeat"
+  | "follow";
+
+interface Action {
+  id: ActionId;
+  label: string;
+  description: string;
+  icon: ReactNode;
 }
 
-const CHALLENGES: Challenge[] = [
+interface Experiment {
+  id: string;
+  title: string;
+  question: string;
+  object: string;
+  atmosphere: string;
+  actions: Action[];
+}
+
+interface Result {
+  title: string;
+  text: string;
+  rarity: "common" | "rare" | "strange" | "unknown";
+  points: number;
+  discovered: boolean;
+  clue?: string;
+}
+
+interface GameState {
+  lastPlayDate: string;
+
+  points: number;
+  discoveries: number;
+
+  experimentsToday: number;
+  bestExperimentScore: number;
+
+  currentExperimentId: string;
+  history: string[];
+
+  discoveredResults: string[];
+
+  personalBest: number;
+  targetBest: number;
+}
+
+// ============================================================================
+// EXPERIMENTS
+// ============================================================================
+//
+// The important part:
+//
+// There is NO single obvious optimal button.
+//
+// The player is encouraged to ask:
+//
+// "What happens if I inspect it first?"
+// "What if I wait?"
+// "What if I reverse what I just did?"
+// "What if I combine them?"
+// "What happens if I do the weird thing?"
+//
+// ============================================================================
+
+const EXPERIMENTS: Experiment[] = [
   {
-    id: 0,
-    title: "One More",
-    subtitle: "Can you reach the next 10 taps?",
-    icon: "tap",
-    target: 10,
-    rewardMultiplier: 1.25,
+    id: "red-box",
+    title: "THE RED BOX",
+    question:
+      "What happens if you don't open it immediately?",
+    object:
+      "A small red box is sitting in the middle of an empty room.",
+    atmosphere:
+      "It is warm. You don't remember putting it there.",
+    actions: [
+      {
+        id: "inspect",
+        label: "Inspect",
+        description:
+          "Look closely before touching it.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "touch",
+        label: "Touch",
+        description:
+          "Put your hand on the box.",
+        icon: <Search size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Wait",
+        description:
+          "Do absolutely nothing.",
+        icon: <Sparkles size={15} />,
+      },
+      {
+        id: "reverse",
+        label: "Walk away",
+        description:
+          "Leave the box alone.",
+        icon: <ArrowRight size={15} />,
+      },
+    ],
   },
+
   {
-    id: 1,
-    title: "Build Momentum",
-    subtitle: "Can you reach a 15× combo?",
-    icon: "combo",
-    target: 15,
-    rewardMultiplier: 1.5,
+    id: "three-switches",
+    title: "THREE SWITCHES",
+    question:
+      "Only one combination does something. Which?",
+    object:
+      "Three switches sit beneath a completely dark screen.",
+    atmosphere:
+      "There are no instructions.",
+    actions: [
+      {
+        id: "inspect",
+        label: "Inspect",
+        description:
+          "Look for a clue.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "touch",
+        label: "Switch 1",
+        description:
+          "Flip the first switch.",
+        icon: <Zap size={15} />,
+      },
+      {
+        id: "combine",
+        label: "Switch 2 + 3",
+        description:
+          "Try two at once.",
+        icon: <Shuffle size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Wait",
+        description:
+          "See whether something happens.",
+        icon: <Sparkles size={15} />,
+      },
+    ],
   },
+
   {
-    id: 2,
-    title: "Find the Critical",
-    subtitle: "Can you land 3 critical hits?",
-    icon: "critical",
-    target: 3,
-    rewardMultiplier: 1.75,
+    id: "glass-orb",
+    title: "THE GLASS ORB",
+    question:
+      "Why does it react differently every time?",
+    object:
+      "A transparent orb floats a few centimeters above the floor.",
+    atmosphere:
+      "It changes color when you approach.",
+    actions: [
+      {
+        id: "touch",
+        label: "Touch",
+        description:
+          "Touch the surface.",
+        icon: <Search size={15} />,
+      },
+      {
+        id: "inspect",
+        label: "Observe",
+        description:
+          "Watch it carefully.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Wait",
+        description:
+          "Give it time.",
+        icon: <Sparkles size={15} />,
+      },
+      {
+        id: "reverse",
+        label: "Back away",
+        description:
+          "Move away from it.",
+        icon: <ArrowRight size={15} />,
+      },
+    ],
   },
+
   {
-    id: 3,
-    title: "Push It",
-    subtitle: "Can you earn 100 points this run?",
-    icon: "score",
-    target: 100,
-    rewardMultiplier: 2,
+    id: "locked-door",
+    title: "THE LOCKED DOOR",
+    question:
+      "There is no key. So what opens it?",
+    object:
+      "A completely ordinary door has no handle and no visible lock.",
+    atmosphere:
+      "Something is moving behind it.",
+    actions: [
+      {
+        id: "inspect",
+        label: "Inspect",
+        description:
+          "Study the door.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "touch",
+        label: "Knock",
+        description:
+          "Knock three times.",
+        icon: <Search size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Listen",
+        description:
+          "Stand completely still.",
+        icon: <Sparkles size={15} />,
+      },
+      {
+        id: "remove",
+        label: "Remove",
+        description:
+          "Try something unexpected.",
+        icon: <FlaskConical size={15} />,
+      },
+    ],
   },
+
   {
-    id: 4,
-    title: "Don't Stop",
-    subtitle: "Can you reach a 30× combo?",
-    icon: "combo",
-    target: 30,
-    rewardMultiplier: 2.25,
+    id: "machine",
+    title: "THE MACHINE",
+    question:
+      "It has one button. But what does the button do?",
+    object:
+      "A strange machine hums quietly.",
+    atmosphere:
+      "The display reads: 'ARE YOU SURE?'",
+    actions: [
+      {
+        id: "touch",
+        label: "Press",
+        description:
+          "Press the button.",
+        icon: <Zap size={15} />,
+      },
+      {
+        id: "inspect",
+        label: "Inspect",
+        description:
+          "Search the machine.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Wait",
+        description:
+          "Don't press anything.",
+        icon: <Sparkles size={15} />,
+      },
+      {
+        id: "reverse",
+        label: "Unplug",
+        description:
+          "Try the opposite.",
+        icon: <ArrowRight size={15} />,
+      },
+    ],
   },
+
   {
-    id: 5,
-    title: "Lucky Run",
-    subtitle: "Can you land 5 critical hits?",
-    icon: "critical",
-    target: 5,
-    rewardMultiplier: 2.5,
+    id: "black-hole",
+    title: "THE BLACK DOT",
+    question:
+      "What happens if you get closer?",
+    object:
+      "A perfectly black dot floats in the air.",
+    atmosphere:
+      "It appears to be much deeper than the room.",
+    actions: [
+      {
+        id: "inspect",
+        label: "Study",
+        description:
+          "Try to understand it.",
+        icon: <Eye size={15} />,
+      },
+      {
+        id: "touch",
+        label: "Touch",
+        description:
+          "Reach toward it.",
+        icon: <Search size={15} />,
+      },
+      {
+        id: "wait",
+        label: "Wait",
+        description:
+          "Let it change.",
+        icon: <Sparkles size={15} />,
+      },
+      {
+        id: "follow",
+        label: "Enter",
+        description:
+          "Stop being cautious.",
+        icon: <ArrowRight size={15} />,
+      },
+    ],
   },
 ];
 
-function randomChallengeId(previous?: number): number {
-  if (CHALLENGES.length <= 1) return 0;
+// ============================================================================
+// RESULT ENGINE
+// ============================================================================
+//
+// Results are intentionally partly deterministic and partly surprising.
+//
+// Same experiment + same action can produce different outcomes.
+//
+// But previous actions also influence the hidden result.
+//
+// That creates:
+//
+// "I got THIS last time..."
+// "What if I do something different?"
+//
+// ============================================================================
 
-  let next = Math.floor(Math.random() * CHALLENGES.length);
+const RESULT_TITLES = [
+  "Nothing happened.",
+  "Something moved.",
+  "You found a hidden mechanism.",
+  "That wasn't supposed to happen.",
+  "It reacted to you.",
+  "You discovered a pattern.",
+  "The room changed.",
+  "You found something behind it.",
+  "It remembered your last move.",
+  "You discovered a secret.",
+];
 
-  if (previous !== undefined) {
-    while (next === previous) {
-      next = Math.floor(Math.random() * CHALLENGES.length);
-    }
+function hashString(value: string): number {
+  let hash = 0;
+
+  for (
+    let i = 0;
+    i < value.length;
+    i++
+  ) {
+    hash =
+      (hash << 5) -
+      hash +
+      value.charCodeAt(i);
+
+    hash |= 0;
   }
 
-  return next;
+  return Math.abs(hash);
 }
 
-function getChallenge(id: number): Challenge {
-  return CHALLENGES[id] ?? CHALLENGES[0];
-}
+function generateResult(
+  experiment: Experiment,
+  action: ActionId,
+  history: string[],
+  levelInfo: LevelInfo
+): Result {
+  const previous =
+    history.length > 0
+      ? history[
+          history.length - 1
+        ]
+      : "none";
 
-// ============================================================================
-// MYSTERY REWARDS
-// ============================================================================
-//
-// The user should not know exactly what comes next.
-// The anticipation is intentional.
-//
-// ============================================================================
+  const seed =
+    hashString(
+      `${experiment.id}:${action}:${previous}:${history.length}:${Math.floor(
+        Math.random() * 7
+      )}`
+    );
 
-const MYSTERY_REWARDS = [
-  {
-    title: "UNKNOWN CACHE",
-    subtitle: "A hidden multiplier was discovered.",
-    multiplier: 1.5,
-  },
-  {
-    title: "LUCKY SURGE",
-    subtitle: "The next taps are worth more.",
-    multiplier: 2,
-  },
-  {
-    title: "OVERDRIVE",
-    subtitle: "Momentum has been amplified.",
-    multiplier: 2.5,
-  },
-  {
-    title: "SECRET COMBO",
-    subtitle: "The system rewarded persistence.",
-    multiplier: 3,
-  },
-  {
-    title: "RARE DROP",
-    subtitle: "You found something unusually valuable.",
-    multiplier: 4,
-  },
-];
+  const roll =
+    seed % 100;
 
-function getMysteryReward(index: number) {
-  return MYSTERY_REWARDS[index % MYSTERY_REWARDS.length];
-}
+  let rarity:
+    | "common"
+    | "rare"
+    | "strange"
+    | "unknown";
 
-// ============================================================================
-// ECONOMY
-// ============================================================================
+  if (roll < 50) {
+    rarity = "common";
+  } else if (roll < 78) {
+    rarity = "rare";
+  } else if (roll < 94) {
+    rarity = "strange";
+  } else {
+    rarity = "unknown";
+  }
 
-const TAP_BASE_COST = 20;
-const TAP_COST_GROWTH = 1.32;
+  const actionResults: Record<
+    ActionId,
+    string[]
+  > = {
+    inspect: [
+      "You notice a tiny detail that wasn't obvious before.",
+      "There is a pattern hidden in the surface.",
+      "You realize the object has been reacting to you.",
+      "Something changes when you stop looking directly at it.",
+    ],
 
-const DPS_BASE_COST = 40;
-const DPS_COST_GROWTH = 1.38;
+    touch: [
+      "The object becomes slightly warmer.",
+      "You feel a tiny vibration.",
+      "Something responds from the other side.",
+      "The object changes state.",
+    ],
 
-function tapUpgradeCost(level: number): number {
-  return Math.max(
-    1,
-    Math.round(TAP_BASE_COST * Math.pow(TAP_COST_GROWTH, level))
-  );
-}
+    wait: [
+      "Nothing happens... for now.",
+      "After a few seconds, something moves.",
+      "The silence itself seems to be part of the experiment.",
+      "You notice something you would have missed by acting.",
+    ],
 
-function dpsUpgradeCost(level: number): number {
-  return Math.max(
-    1,
-    Math.round(DPS_BASE_COST * Math.pow(DPS_COST_GROWTH, level))
-  );
-}
+    combine: [
+      "The two actions interact unexpectedly.",
+      "The machine enters a new state.",
+      "Something that was invisible becomes visible.",
+      "You accidentally discovered a combination.",
+    ],
 
-function computeTapValue(
-  tapLevel: number,
-  levelMultiplier: number,
-  combo: number,
-  mysteryMultiplier: number
-): number {
-  const base = 1 + tapLevel;
+    reverse: [
+      "The object reacts to you leaving.",
+      "Going backward reveals something new.",
+      "The system seems to prefer the opposite action.",
+      "You discover that retreat was actually progress.",
+    ],
 
-  const comboMultiplier =
-    combo >= 30
-      ? 2
-      : combo >= 20
-        ? 1.6
-        : combo >= 10
-          ? 1.3
-          : 1;
+    remove: [
+      "You find something hidden underneath.",
+      "Removing one thing changes everything else.",
+      "The object was hiding a second mechanism.",
+      "You found the simplest solution.",
+    ],
 
-  return Math.max(
+    repeat: [
+      "It behaves differently the second time.",
+      "The result changes.",
+      "It seems to remember what you did.",
+      "Repeating the experiment reveals a new state.",
+    ],
+
+    follow: [
+      "You follow the strange signal.",
+      "The path changes as you move.",
+      "You discover something completely unexpected.",
+      "There was another room all along.",
+    ],
+  };
+
+  const options =
+    actionResults[action];
+
+  const text =
+    options[
+      seed % options.length
+    ];
+
+  const title =
+    rarity === "unknown"
+      ? "???"
+      : RESULT_TITLES[
+          seed %
+            RESULT_TITLES.length
+        ];
+
+  const basePoints =
+    rarity === "common"
+      ? 10
+      : rarity === "rare"
+        ? 30
+        : rarity === "strange"
+          ? 75
+          : 200;
+
+  const points = Math.max(
     1,
     Math.round(
-      base *
-        levelMultiplier *
-        comboMultiplier *
-        mysteryMultiplier
+      basePoints *
+        levelInfo.multiplier
     )
   );
-}
 
-function computePerSecondValue(
-  perSecondLevel: number,
-  levelMultiplier: number
-): number {
-  return Math.max(
-    0,
-    Math.round(perSecondLevel * levelMultiplier)
-  );
-}
+  const discovered =
+    rarity !== "common" ||
+    roll > 35;
 
-// ============================================================================
-// POINT APPLICATION
-// ============================================================================
-
-function applyPoints(
-  prev: TapGameState,
-  amount: number
-): TapGameState {
-  if (amount <= 0) return prev;
-
-  const scoreToday = prev.scoreToday + amount;
-  const balance = prev.balance + amount;
-
-  const personalBest =
-    scoreToday > prev.personalBest
-      ? scoreToday
-      : prev.personalBest;
-
-  let milestonesToday = prev.milestonesToday;
-
-  if (prev.targetBest > 0) {
-    const m50 =
-      milestonesToday.m50 ||
-      scoreToday >= prev.targetBest * 0.5;
-
-    const m75 =
-      milestonesToday.m75 ||
-      scoreToday >= prev.targetBest * 0.75;
-
-    const m100 =
-      milestonesToday.m100 ||
-      scoreToday >= prev.targetBest;
-
-    milestonesToday = {
-      m50,
-      m75,
-      m100,
-    };
-  }
+  const clue =
+    rarity === "unknown"
+      ? "There is more here than you can currently see."
+      : rarity === "strange"
+        ? "Try a different action next time."
+        : undefined;
 
   return {
-    ...prev,
-    balance,
-    scoreToday,
-    personalBest,
-    milestonesToday,
+    title,
+    text,
+    rarity,
+    points,
+    discovered,
+    clue,
   };
+}
+
+// ============================================================================
+// STORAGE
+// ============================================================================
+
+const STORAGE_KEY =
+  "curiosity_game_state_v1";
+
+function todayKey(): string {
+  return new Date().toDateString();
+}
+
+function defaultState(
+  carry?: {
+    personalBest: number;
+    targetBest: number;
+  }
+): GameState {
+  const experiment =
+    EXPERIMENTS[
+      Math.floor(
+        Math.random() *
+          EXPERIMENTS.length
+      )
+    ];
+
+  return {
+    lastPlayDate:
+      todayKey(),
+
+    points: 0,
+    discoveries: 0,
+
+    experimentsToday: 0,
+    bestExperimentScore: 0,
+
+    currentExperimentId:
+      experiment.id,
+
+    history: [],
+
+    discoveredResults: [],
+
+    personalBest:
+      carry?.personalBest ??
+      0,
+
+    targetBest:
+      carry?.targetBest ??
+      0,
+  };
+}
+
+function loadState(): GameState {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return defaultState();
+  }
+
+  try {
+    const raw =
+      window.localStorage.getItem(
+        STORAGE_KEY
+      );
+
+    if (!raw) {
+      return defaultState();
+    }
+
+    const parsed =
+      JSON.parse(raw) as Partial<GameState>;
+
+    if (
+      parsed.lastPlayDate !==
+      todayKey()
+    ) {
+      return defaultState({
+        personalBest:
+          parsed.personalBest ??
+          0,
+        targetBest:
+          parsed.personalBest ??
+          0,
+      });
+    }
+
+    return {
+      ...defaultState(),
+      ...parsed,
+      lastPlayDate:
+        todayKey(),
+    };
+  } catch {
+    return defaultState();
+  }
+}
+
+function saveState(
+  state: GameState
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(state)
+    );
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 // ============================================================================
 // FORMATTING
 // ============================================================================
 
-function formatPoints(n: number): string {
-  const rounded = Math.round(n);
-
-  if (rounded < 1000) {
-    return rounded.toString();
+function formatPoints(
+  n: number
+): string {
+  if (n < 1000) {
+    return Math.round(n).toString();
   }
 
-  return new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: 2,
-  }).format(rounded);
+  return new Intl.NumberFormat(
+    "en-US",
+    {
+      notation: "compact",
+      maximumFractionDigits: 2,
+    }
+  ).format(Math.round(n));
 }
 
-function formatMultiplier(n: number): string {
-  if (n < 10) {
-    return `${n.toFixed(2)}×`;
-  }
+function formatCountdown(
+  ms: number
+): string {
+  const totalMinutes =
+    Math.max(
+      0,
+      Math.floor(
+        ms / 60000
+      )
+    );
 
-  if (n < 100) {
-    return `${n.toFixed(1)}×`;
-  }
+  const h =
+    Math.floor(
+      totalMinutes / 60
+    );
 
-  return `${formatPoints(n)}×`;
+  const m =
+    totalMinutes % 60;
+
+  return `${h}h ${m
+    .toString()
+    .padStart(2, "0")}m`;
 }
 
-function formatCountdown(ms: number): string {
-  const totalMinutes = Math.max(
-    0,
-    Math.floor(ms / 60000)
+function getExperiment(
+  id: string
+): Experiment {
+  return (
+    EXPERIMENTS.find(
+      (experiment) =>
+        experiment.id === id
+    ) ??
+    EXPERIMENTS[0]
   );
-
-  const h = Math.floor(totalMinutes / 60);
-  const m = totalMinutes % 60;
-
-  return `${h}h ${m.toString().padStart(2, "0")}m`;
 }
 
 // ============================================================================
-// MAIN COMPONENT
+// MAIN
 // ============================================================================
-
-let tapBurstId = 0;
 
 export default function PhaserShooter({
   lifetimeKills,
@@ -525,762 +805,347 @@ export default function PhaserShooter({
     useState<Phase>("menu");
 
   const [state, setState] =
-    useState<TapGameState>(() => defaultState());
+    useState<GameState>(() =>
+      defaultState()
+    );
 
   const [hydrated, setHydrated] =
     useState(false);
 
   const [now, setNow] =
-    useState(() => Date.now());
+    useState(() =>
+      Date.now()
+    );
 
-  const [toast, setToast] =
-    useState<string | null>(null);
+  const [result, setResult] =
+    useState<Result | null>(
+      null
+    );
 
-  const [tapBursts, setTapBursts] =
-    useState<
-      {
-        id: number;
-        x: number;
-        y: number;
-        value: number;
-        critical: boolean;
-      }[]
-    >([]);
-
-  const [mysteryMultiplier, setMysteryMultiplier] =
-    useState(1);
-
-  const [showMystery, setShowMystery] =
+  const [thinking, setThinking] =
     useState(false);
 
-  const [lastCritical, setLastCritical] =
+  const [revealed, setRevealed] =
     useState(false);
 
-  const tapButtonRef =
-    useRef<HTMLButtonElement>(null);
+  const resultTimer =
+    useRef<
+      ReturnType<
+        typeof setTimeout
+      > | null
+    >(null);
 
-  const prevMilestonesRef =
-    useRef<Milestones>(state.milestonesToday);
+  const levelInfo =
+    useMemo(
+      () =>
+        levelFromLifetimeKills(
+          lifetimeKills
+        ),
+      [lifetimeKills]
+    );
 
-  // ==========================================================================
-  // LEVEL
-  // ==========================================================================
+  const experiment =
+    useMemo(
+      () =>
+        getExperiment(
+          state.currentExperimentId
+        ),
+      [state.currentExperimentId]
+    );
 
-  const levelInfo = useMemo(
-    () =>
-      levelFromLifetimeKills(
-        lifetimeKills
-      ),
-    [lifetimeKills]
-  );
-
-  const challenge = useMemo(
-    () =>
-      getChallenge(
-        state.challengeId
-      ),
-    [state.challengeId]
-  );
-
-  const tapValue = useMemo(
-    () =>
-      computeTapValue(
-        state.tapLevel,
-        levelInfo.multiplier,
-        state.combo,
-        mysteryMultiplier
-      ),
-    [
-      state.tapLevel,
-      state.combo,
-      levelInfo.multiplier,
-      mysteryMultiplier,
-    ]
-  );
-
-  const perSecondValue = useMemo(
-    () =>
-      computePerSecondValue(
-        state.perSecondLevel,
-        levelInfo.multiplier
-      ),
-    [
-      state.perSecondLevel,
-      levelInfo.multiplier,
-    ]
-  );
-
-  // ==========================================================================
+  // ========================================================================
   // LOAD
-  // ==========================================================================
+  // ========================================================================
 
   useEffect(() => {
     setState(loadState());
     setHydrated(true);
   }, []);
 
-  // ==========================================================================
+  // ========================================================================
   // SAVE
-  // ==========================================================================
+  // ========================================================================
 
   useEffect(() => {
     if (!hydrated) return;
 
     saveState(state);
-  }, [state, hydrated]);
+  }, [
+    state,
+    hydrated,
+  ]);
 
-  // ==========================================================================
+  // ========================================================================
   // CLOCK
-  // ==========================================================================
+  // ========================================================================
 
   useEffect(() => {
-    const id = setInterval(
-      () => setNow(Date.now()),
-      30_000
-    );
-
-    return () => clearInterval(id);
-  }, []);
-
-  // ==========================================================================
-  // DAILY RESET
-  // ==========================================================================
-
-  useEffect(() => {
-    setState((prev) => {
-      if (
-        prev.lastPlayDate ===
-        todayKey()
-      ) {
-        return prev;
-      }
-
-      return defaultState({
-        personalBest:
-          prev.personalBest,
-        targetBest:
-          prev.personalBest,
-      });
-    });
-  }, [now]);
-
-  const msUntilReset = useMemo(() => {
-    const next = new Date();
-
-    next.setHours(
-      24,
-      0,
-      0,
-      0
-    );
-
-    return (
-      next.getTime() - now
-    );
-  }, [now]);
-
-  // ==========================================================================
-  // PASSIVE INCOME
-  // ==========================================================================
-
-  useEffect(() => {
-    if (phase !== "playing") return;
-    if (perSecondValue <= 0) return;
-
-    const id = setInterval(() => {
-      setState((prev) =>
-        applyPoints(
-          prev,
-          perSecondValue
-        )
+    const id =
+      setInterval(
+        () =>
+          setNow(
+            Date.now()
+          ),
+        30_000
       );
-    }, 1000);
-
-    return () => clearInterval(id);
-  }, [
-    phase,
-    perSecondValue,
-  ]);
-
-  // ==========================================================================
-  // MILESTONES
-  // ==========================================================================
-
-  useEffect(() => {
-    const prev =
-      prevMilestonesRef.current;
-
-    const curr =
-      state.milestonesToday;
-
-    if (
-      !prev.m100 &&
-      curr.m100
-    ) {
-      setToast(
-        "🏆 NEW PERSONAL BEST"
-      );
-    } else if (
-      !prev.m75 &&
-      curr.m75
-    ) {
-      setToast(
-        "75% — CAN YOU BEAT IT?"
-      );
-    } else if (
-      !prev.m50 &&
-      curr.m50
-    ) {
-      setToast(
-        "HALFWAY — KEEP GOING"
-      );
-    }
-
-    prevMilestonesRef.current =
-      curr;
-  }, [
-    state.milestonesToday,
-  ]);
-
-  // ==========================================================================
-  // TOAST
-  // ==========================================================================
-
-  useEffect(() => {
-    if (!toast) return;
-
-    const id = setTimeout(
-      () => setToast(null),
-      2200
-    );
 
     return () =>
-      clearTimeout(id);
-  }, [toast]);
+      clearInterval(id);
+  }, []);
 
-  // ==========================================================================
-  // RESET COMBO WHEN USER STAYS INACTIVE
-  // ==========================================================================
+  // ========================================================================
+  // DAILY RESET
+  // ========================================================================
 
-  const comboTimeoutRef =
-    useRef<ReturnType<
-      typeof setTimeout
-    > | null>(null);
+  useEffect(() => {
+    setState(
+      (previous) => {
+        if (
+          previous.lastPlayDate ===
+          todayKey()
+        ) {
+          return previous;
+        }
 
-  const scheduleComboReset =
-    useCallback(() => {
-      if (
-        comboTimeoutRef.current
-      ) {
-        clearTimeout(
-          comboTimeoutRef.current
-        );
+        return defaultState({
+          personalBest:
+            previous.personalBest,
+          targetBest:
+            previous.personalBest,
+        });
       }
+    );
+  }, [now]);
 
-      comboTimeoutRef.current =
-        setTimeout(() => {
-          setState((prev) => ({
-            ...prev,
-            combo: 0,
-          }));
-        }, 1800);
-    }, []);
+  // ========================================================================
+  // CLEANUP
+  // ========================================================================
 
   useEffect(() => {
     return () => {
       if (
-        comboTimeoutRef.current
+        resultTimer.current
       ) {
         clearTimeout(
-          comboTimeoutRef.current
+          resultTimer.current
         );
       }
     };
   }, []);
 
-  // ==========================================================================
-  // CHALLENGE PROGRESS
-  // ==========================================================================
+  // ========================================================================
+  // RESET EXPERIMENT
+  // ========================================================================
 
-  const updateChallenge =
+  const nextExperiment =
+    useCallback(() => {
+      const available =
+        EXPERIMENTS.filter(
+          (item) =>
+            item.id !==
+            state.currentExperimentId
+        );
+
+      const next =
+        available[
+          Math.floor(
+            Math.random() *
+              available.length
+          )
+        ];
+
+      setResult(null);
+      setRevealed(false);
+
+      setState(
+        (previous) => ({
+          ...previous,
+          currentExperimentId:
+            next.id,
+          history: [],
+        })
+      );
+    }, [
+      state.currentExperimentId,
+    ]);
+
+  // ========================================================================
+  // TRY ACTION
+  // ========================================================================
+
+  const tryAction =
     useCallback(
-      (
-        prev: TapGameState,
-        event:
-          | "tap"
-          | "critical"
-          | "combo"
-          | "score",
-        newScore: number,
-        newCombo: number
-      ): TapGameState => {
+      (actionId: ActionId) => {
         if (
-          prev.challengeCompleted
+          thinking ||
+          revealed
         ) {
-          return prev;
+          return;
         }
 
-        const current =
-          getChallenge(
-            prev.challengeId
+        setThinking(true);
+
+        const generated =
+          generateResult(
+            experiment,
+            actionId,
+            state.history,
+            levelInfo
           );
 
-        let progress =
-          prev.challengeProgress;
+        const historyKey =
+          `${experiment.id}:${actionId}:${generated.title}`;
 
-        if (
-          current.icon === "tap" &&
-          event === "tap"
-        ) {
-          progress += 1;
-        }
+        setState(
+          (previous) => {
+            const newPoints =
+              previous.points +
+              generated.points;
 
-        if (
-          current.icon ===
-            "critical" &&
-          event === "critical"
-        ) {
-          progress += 1;
-        }
-
-        if (
-          current.icon ===
-            "combo" &&
-          event === "combo"
-        ) {
-          progress =
-            Math.max(
-              progress,
-              newCombo
-            );
-        }
-
-        if (
-          current.icon ===
-            "score" &&
-          event === "score"
-        ) {
-          progress =
-            Math.max(
-              progress,
-              newScore
-            );
-        }
-
-        const completed =
-          progress >=
-          current.target;
-
-        if (!completed) {
-          return {
-            ...prev,
-            challengeProgress:
-              progress,
-          };
-        }
-
-        return {
-          ...prev,
-          challengeProgress:
-            current.target,
-          challengeCompleted:
-            true,
-          challengesCompletedToday:
-            prev.challengesCompletedToday +
-            1,
-          mysteryIndex:
-            prev.mysteryIndex + 1,
-        };
-      },
-      []
-    );
-
-  // ==========================================================================
-  // TAP
-  // ==========================================================================
-
-  const handleTap =
-    useCallback(
-      (
-        clientX: number,
-        clientY: number
-      ) => {
-        const critical =
-          Math.random() <
-          Math.min(
-            0.08 +
-              state.combo *
-                0.003,
-            0.25
-          );
-
-        const combo =
-          state.combo + 1;
-
-        const comboMultiplier =
-          combo >= 30
-            ? 2
-            : combo >= 20
-              ? 1.6
-              : combo >= 10
-                ? 1.3
-                : 1;
-
-        const baseValue =
-          computeTapValue(
-            state.tapLevel,
-            levelInfo.multiplier,
-            combo,
-            mysteryMultiplier
-          );
-
-        const value =
-          critical
-            ? Math.round(
-                baseValue * 3
-              )
-            : baseValue;
-
-        setState((prev) => {
-          const afterPoints =
-            applyPoints(
-              prev,
-              value
-            );
-
-          const nextCombo =
-            prev.combo + 1;
-
-          let next =
-            {
-              ...afterPoints,
-              combo:
-                nextCombo,
-              bestCombo:
-                Math.max(
-                  prev.bestCombo,
-                  nextCombo
-                ),
-              totalTapsToday:
-                prev.totalTapsToday +
-                1,
-              criticalHitsToday:
-                prev.criticalHitsToday +
-                (critical ? 1 : 0),
-            };
-
-          next =
-            updateChallenge(
-              next,
-              critical
-                ? "critical"
-                : "tap",
-              next.scoreToday,
-              nextCombo
-            );
-
-          if (
-            nextCombo >=
-              challenge.target &&
-            challenge.icon ===
-              "combo"
-          ) {
-            next =
-              updateChallenge(
-                next,
-                "combo",
-                next.scoreToday,
-                nextCombo
+            const personalBest =
+              Math.max(
+                previous.personalBest,
+                newPoints
               );
+
+            return {
+              ...previous,
+
+              points:
+                newPoints,
+
+              personalBest,
+
+              experimentsToday:
+                previous.experimentsToday +
+                1,
+
+              bestExperimentScore:
+                Math.max(
+                  previous.bestExperimentScore,
+                  generated.points
+                ),
+
+              discoveries:
+                previous.discoveries +
+                (generated.discovered
+                  ? 1
+                  : 0),
+
+              history: [
+                ...previous.history,
+                historyKey,
+              ],
+
+              discoveredResults:
+                generated.discovered
+                  ? [
+                      ...previous.discoveredResults,
+                      historyKey,
+                    ]
+                  : previous.discoveredResults,
+            };
           }
-
-          next =
-            updateChallenge(
-              next,
-              "score",
-              next.scoreToday,
-              nextCombo
-            );
-
-          return next;
-        });
-
-        setLastCritical(
-          critical
         );
 
-        if (critical) {
-          setToast(
-            `CRITICAL ×3 — ${formatPoints(
-              value
-            )}`
-          );
-        } else if (
-          combo === 10 ||
-          combo === 20 ||
-          combo === 30
-        ) {
-          setToast(
-            `${combo}× COMBO`
-          );
-        }
-
-        scheduleComboReset();
-
-        const rect =
-          tapButtonRef.current?.getBoundingClientRect();
-
-        const id =
-          tapBurstId++;
-
-        setTapBursts(
-          (prev) => [
-            ...prev,
-            {
-              id,
-              x: rect
-                ? clientX -
-                  rect.left
-                : 0,
-              y: rect
-                ? clientY -
-                  rect.top
-                : 0,
-              value,
-              critical,
+        resultTimer.current =
+          setTimeout(
+            () => {
+              setResult(
+                generated
+              );
+              setThinking(false);
+              setRevealed(true);
             },
-          ]
-        );
-
-        setTimeout(() => {
-          setTapBursts(
-            (prev) =>
-              prev.filter(
-                (b) =>
-                  b.id !== id
-              )
+            450 +
+              Math.random() *
+                700
           );
-        }, 700);
-
-        // If a challenge was completed, reveal the mystery reward.
-        setTimeout(() => {
-          setState((current) => {
-            if (
-              !current.challengeCompleted
-            ) {
-              return current;
-            }
-
-            return current;
-          });
-        }, 50);
       },
       [
-        state.tapLevel,
-        state.combo,
-        levelInfo.multiplier,
-        mysteryMultiplier,
-        challenge,
-        updateChallenge,
-        scheduleComboReset,
+        thinking,
+        revealed,
+        experiment,
+        state.history,
+        levelInfo,
       ]
     );
 
-  // ==========================================================================
-  // MYSTERY CLAIM
-  // ==========================================================================
+  // ========================================================================
+  // RESET CURRENT EXPERIMENT
+  // ========================================================================
 
-  const claimMystery =
+  const restartExperiment =
     useCallback(() => {
-      const reward =
-        getMysteryReward(
-          state.mysteryIndex
-        );
+      setResult(null);
+      setRevealed(false);
+      setThinking(false);
 
-      setMysteryMultiplier(
-        reward.multiplier
+      setState(
+        (previous) => ({
+          ...previous,
+          history: [],
+        })
       );
-
-      setState((prev) => ({
-        ...prev,
-        challengeId:
-          randomChallengeId(
-            prev.challengeId
-          ),
-        challengeProgress: 0,
-        challengeTarget:
-          getChallenge(
-            randomChallengeId(
-              prev.challengeId
-            )
-          ).target,
-        challengeCompleted:
-          false,
-      }));
-
-      setShowMystery(false);
-
-      setToast(
-        `${reward.title} — ${formatMultiplier(
-          reward.multiplier
-        )}`
-      );
-    }, [
-      state.mysteryIndex,
-      state.challengeId,
-    ]);
-
-  // ==========================================================================
-  // SHOP
-  // ==========================================================================
-
-  const buyTapUpgrade =
-    useCallback(() => {
-      setState((prev) => {
-        const cost =
-          tapUpgradeCost(
-            prev.tapLevel
-          );
-
-        if (
-          prev.balance <
-          cost
-        ) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          balance:
-            prev.balance -
-            cost,
-          tapLevel:
-            prev.tapLevel + 1,
-        };
-      });
     }, []);
 
-  const buyDpsUpgrade =
-    useCallback(() => {
-      setState((prev) => {
-        const cost =
-          dpsUpgradeCost(
-            prev.perSecondLevel
-          );
+  // ========================================================================
+  // EXIT
+  // ========================================================================
 
-        if (
-          prev.balance <
-          cost
-        ) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          balance:
-            prev.balance -
-            cost,
-          perSecondLevel:
-            prev.perSecondLevel +
-            1,
-        };
-      });
-    }, []);
-
-  // ==========================================================================
-  // NAVIGATION
-  // ==========================================================================
-
-  const startPlaying =
+  const start =
     useCallback(
-      () => setPhase("playing"),
+      () =>
+        setPhase(
+          "playing"
+        ),
       []
     );
 
-  const backToMenu =
+  const back =
     useCallback(
-      () => setPhase("menu"),
+      () =>
+        setPhase("menu"),
       []
     );
 
-  // ==========================================================================
-  // DERIVED UI
-  // ==========================================================================
+  // ========================================================================
+  // RESET TIMER
+  // ========================================================================
 
-  const tapUpgradeCostNow =
-    tapUpgradeCost(
-      state.tapLevel
-    );
+  const msUntilReset =
+    useMemo(() => {
+      const next =
+        new Date();
 
-  const dpsUpgradeCostNow =
-    dpsUpgradeCost(
-      state.perSecondLevel
-    );
+      next.setHours(
+        24,
+        0,
+        0,
+        0
+      );
 
-  const nextTapValue =
-    computeTapValue(
-      state.tapLevel + 1,
-      levelInfo.multiplier,
-      state.combo,
-      mysteryMultiplier
-    );
+      return (
+        next.getTime() -
+        now
+      );
+    }, [now]);
 
-  const nextPerSecondValue =
-    computePerSecondValue(
-      state.perSecondLevel + 1,
-      levelInfo.multiplier
-    );
-
-  const progressPct =
-    state.targetBest > 0
-      ? Math.min(
-          1,
-          state.scoreToday /
-            state.targetBest
-        )
-      : 0;
-
-  const challengePct =
-    challenge.target > 0
-      ? Math.min(
-          1,
-          state.challengeProgress /
-            challenge.target
-        )
-      : 0;
-
-  const currentMystery =
-    getMysteryReward(
-      state.mysteryIndex
-    );
-
-  // Detect challenge completion and show mystery screen.
-  useEffect(() => {
-    if (
-      state.challengeCompleted &&
-      !showMystery
-    ) {
-      setShowMystery(true);
-    }
-  }, [
-    state.challengeCompleted,
-    showMystery,
-  ]);
-
-  // ==========================================================================
+  // ========================================================================
   // RENDER
-  // ==========================================================================
+  // ========================================================================
 
   return (
     <div
       style={{
-        position: "relative",
+        position:
+          "relative",
       }}
     >
       <AnimatePresence mode="wait">
         {phase === "menu" && (
           <motion.div
-            key="game-menu"
+            key="menu"
             initial={{
               opacity: 0,
             }}
@@ -1292,19 +1157,21 @@ export default function PhaserShooter({
             }}
           >
             <MenuScreen
-              levelInfo={levelInfo}
-              state={state}
-              hydrated={hydrated}
-              onStart={
-                startPlaying
+              levelInfo={
+                levelInfo
               }
+              state={state}
+              hydrated={
+                hydrated
+              }
+              onStart={start}
             />
           </motion.div>
         )}
 
         {phase === "playing" && (
           <motion.div
-            key="game-playing"
+            key="playing"
             initial={{
               opacity: 0,
             }}
@@ -1315,32 +1182,32 @@ export default function PhaserShooter({
               opacity: 0,
             }}
           >
-            {/* ================================================================
+            {/* ============================================================
                 HEADER
-            ================================================================= */}
+            ============================================================= */}
 
             <div
               style={{
-                display: "flex",
+                display:
+                  "flex",
                 alignItems:
                   "center",
                 justifyContent:
                   "space-between",
-                marginBottom: 10,
-                padding:
-                  "0 2px",
+                marginBottom: 12,
               }}
             >
               <div
                 style={{
-                  display: "flex",
+                  display:
+                    "flex",
                   alignItems:
                     "center",
                   gap: 6,
                 }}
               >
-                <Zap
-                  size={13}
+                <FlaskConical
+                  size={14}
                   color={
                     COLORS.chrome
                   }
@@ -1350,15 +1217,12 @@ export default function PhaserShooter({
                   style={{
                     fontFamily:
                       FONT_MONO,
-                    fontSize: 11,
+                    fontSize: 10,
                     color:
                       COLORS.textMuted,
                   }}
                 >
-                  LV{" "}
-                  {
-                    levelInfo.level
-                  }
+                  LAB
                 </span>
 
                 <span
@@ -1370,10 +1234,9 @@ export default function PhaserShooter({
                       COLORS.chrome,
                   }}
                 >
+                  LV{" "}
                   {
-                    formatMultiplier(
-                      levelInfo.multiplier
-                    )
+                    levelInfo.level
                   }
                 </span>
               </div>
@@ -1382,15 +1245,12 @@ export default function PhaserShooter({
                 style={{
                   fontFamily:
                     FONT_MONO,
-                  fontSize: 10,
+                  fontSize: 9,
                   color:
                     COLORS.textMuted,
-                  textTransform:
-                    "uppercase",
-                  letterSpacing:
-                    0.6,
                 }}
               >
+                RESET{" "}
                 {
                   formatCountdown(
                     msUntilReset
@@ -1399,10 +1259,7 @@ export default function PhaserShooter({
               </div>
 
               <button
-                onClick={
-                  backToMenu
-                }
-                aria-label="Back to menu"
+                onClick={back}
                 style={{
                   width: 30,
                   height: 30,
@@ -1412,7 +1269,7 @@ export default function PhaserShooter({
                     "center",
                   justifyContent:
                     "center",
-                  borderRadius: 4,
+                  borderRadius: 5,
                   border: `1px solid ${COLORS.panelLine}`,
                   background:
                     COLORS.panel,
@@ -1426,180 +1283,19 @@ export default function PhaserShooter({
               </button>
             </div>
 
-            {/* ================================================================
-                SCORE
-            ================================================================= */}
+            {/* ============================================================
+                CURIOSITY HEADER
+            ============================================================= */}
 
             <div
               style={{
                 padding:
-                  "18px 16px",
-                borderRadius: 6,
+                  "17px 16px",
+                borderRadius: 7,
                 background:
                   COLORS.panel,
                 border: `1px solid ${COLORS.panelLine}`,
-                textAlign:
-                  "center",
-              }}
-            >
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 10,
-                  color:
-                    COLORS.textMuted,
-                  textTransform:
-                    "uppercase",
-                  letterSpacing:
-                    1.5,
-                }}
-              >
-                Today
-              </div>
-
-              <motion.div
-                key={Math.floor(
-                  state.scoreToday /
-                    10
-                )}
-                initial={{
-                  scale: 1.04,
-                }}
-                animate={{
-                  scale: 1,
-                }}
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 42,
-                  fontWeight: 700,
-                  color:
-                    COLORS.text,
-                  marginTop: 4,
-                }}
-              >
-                {formatPoints(
-                  state.scoreToday
-                )}
-              </motion.div>
-
-              <div
-                style={{
-                  display:
-                    "flex",
-                  justifyContent:
-                    "center",
-                  gap: 18,
-                  marginTop: 8,
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 10.5,
-                  color:
-                    COLORS.textMuted,
-                }}
-              >
-                <span>
-                  {formatPoints(
-                    state.balance
-                  )}{" "}
-                  banked
-                </span>
-
-                {perSecondValue >
-                  0 && (
-                  <span>
-                    +
-                    {formatPoints(
-                      perSecondValue
-                    )}
-                    /sec
-                  </span>
-                )}
-              </div>
-
-              {/* COMBO */}
-
-              <AnimatePresence>
-                {state.combo >
-                  1 && (
-                  <motion.div
-                    initial={{
-                      opacity: 0,
-                      scale: 0.8,
-                    }}
-                    animate={{
-                      opacity: 1,
-                      scale: 1,
-                    }}
-                    style={{
-                      marginTop: 10,
-                      fontFamily:
-                        FONT_DISPLAY,
-                      fontWeight: 800,
-                      fontSize:
-                        14,
-                      color:
-                        COLORS.chrome,
-                    }}
-                  >
-                    <Flame
-                      size={14}
-                      style={{
-                        verticalAlign:
-                          "middle",
-                        marginRight:
-                          4,
-                      }}
-                    />
-                    {
-                      state.combo
-                    }
-                    × MOMENTUM
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              <MilestoneBar
-                progressPct={
-                  progressPct
-                }
-                targetBest={
-                  state.targetBest
-                }
-                milestones={
-                  state.milestonesToday
-                }
-              />
-            </div>
-
-            {/* ================================================================
-                MYSTERY CHALLENGE
-            ================================================================= */}
-
-            <motion.div
-              animate={
-                state.challengeCompleted
-                  ? {
-                      scale: [
-                        1,
-                        1.02,
-                        1,
-                      ],
-                    }
-                  : {}
-              }
-              transition={{
-                duration: 0.5,
-              }}
-              style={{
-                marginTop: 12,
-                padding:
-                  "13px 14px",
-                borderRadius: 6,
-                background:
-                  COLORS.panel,
-                border: `1px solid ${COLORS.chrome}44`,
+                marginBottom: 10,
               }}
             >
               <div
@@ -1608,595 +1304,22 @@ export default function PhaserShooter({
                     "flex",
                   alignItems:
                     "center",
-                  gap: 8,
-                }}
-              >
-                <div
-                  style={{
-                    width: 32,
-                    height: 32,
-                    borderRadius: 6,
-                    display:
-                      "flex",
-                    alignItems:
-                      "center",
-                    justifyContent:
-                      "center",
-                    background: `${COLORS.chrome}18`,
-                    flexShrink: 0,
-                  }}
-                >
-                  <Target
-                    size={16}
-                    color={
-                      COLORS.chrome
-                    }
-                  />
-                </div>
-
-                <div
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                  }}
-                >
-                  <div
-                    style={{
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      gap: 7,
-                      fontFamily:
-                        FONT_DISPLAY,
-                      fontWeight: 700,
-                      fontSize:
-                        12,
-                      color:
-                        COLORS.text,
-                    }}
-                  >
-                    I WONDER IF I CAN...
-                  </div>
-
-                  <div
-                    style={{
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize:
-                        10,
-                      color:
-                        COLORS.textMuted,
-                      marginTop: 2,
-                    }}
-                  >
-                    {
-                      challenge.subtitle
-                    }
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 10,
-                    color:
-                      COLORS.chrome,
-                    fontWeight: 700,
-                  }}
-                >
-                  {
-                    state.challengeProgress
-                  }
-                  /
-                  {
-                    challenge.target
-                  }
-                </div>
-              </div>
-
-              <div
-                style={{
-                  height: 5,
-                  borderRadius: 3,
-                  background:
-                    COLORS.void,
-                  marginTop: 10,
-                  overflow:
-                    "hidden",
-                }}
-              >
-                <motion.div
-                  animate={{
-                    width: `${
-                      challengePct *
-                      100
-                    }%`,
-                  }}
-                  style={{
-                    height:
-                      "100%",
-                    background:
-                      COLORS.chrome,
-                  }}
-                />
-              </div>
-
-              <div
-                style={{
-                  display:
-                    "flex",
-                  justifyContent:
-                    "space-between",
-                  marginTop: 7,
+                  gap: 7,
                   fontFamily:
                     FONT_MONO,
-                  fontSize: 8.5,
+                  fontSize: 9,
                   color:
-                    COLORS.textMuted,
-                }}
-              >
-                <span>
-                  REWARD
-                </span>
-
-                <span
-                  style={{
-                    color:
-                      COLORS.chrome,
-                  }}
-                >
-                  +
-                  {formatMultiplier(
-                    challenge.rewardMultiplier
-                  )}
-                </span>
-              </div>
-            </motion.div>
-
-            {/* ================================================================
-                TAP BUTTON
-            ================================================================= */}
-
-            <div
-              style={{
-                position:
-                  "relative",
-                display:
-                  "flex",
-                justifyContent:
-                  "center",
-                margin:
-                  "22px 0 20px",
-              }}
-            >
-              <motion.button
-                ref={
-                  tapButtonRef
-                }
-                onClick={(e) =>
-                  handleTap(
-                    e.clientX,
-                    e.clientY
-                  )
-                }
-                whileTap={{
-                  scale: 0.91,
-                }}
-                animate={
-                  state.combo >=
-                  10
-                    ? {
-                        boxShadow: [
-                          `0 0 0 6px ${COLORS.panel}, 0 0 20px ${COLORS.chrome}44`,
-                          `0 0 0 6px ${COLORS.panel}, 0 0 42px ${COLORS.chrome}99`,
-                          `0 0 0 6px ${COLORS.panel}, 0 0 20px ${COLORS.chrome}44`,
-                        ],
-                      }
-                    : {}
-                }
-                transition={{
-                  duration: 1.2,
-                  repeat:
-                    Infinity,
-                }}
-                style={{
-                  width: 164,
-                  height: 164,
-                  borderRadius:
-                    "50%",
-                  border: "none",
-                  background:
                     COLORS.chrome,
-                  color:
-                    COLORS.void,
-                  display:
-                    "flex",
-                  flexDirection:
-                    "column",
-                  alignItems:
-                    "center",
-                  justifyContent:
-                    "center",
-                  gap: 4,
-                  cursor:
-                    "pointer",
-                  boxShadow: `0 0 0 6px ${COLORS.panel}, 0 0 24px ${COLORS.chrome}55`,
-                  position:
-                    "relative",
-                  overflow:
-                    "visible",
-                }}
-              >
-                <motion.div
-                  animate={
-                    state.combo >=
-                    10
-                      ? {
-                          rotate: [
-                            0,
-                            -5,
-                            5,
-                            0,
-                          ],
-                        }
-                      : {}
-                  }
-                  transition={{
-                    duration:
-                      0.4,
-                    repeat:
-                      Infinity,
-                  }}
-                >
-                  <MousePointerClick
-                    size={34}
-                  />
-                </motion.div>
-
-                <span
-                  style={{
-                    fontFamily:
-                      FONT_DISPLAY,
-                    fontWeight: 800,
-                    fontSize: 15,
-                    letterSpacing:
-                      1,
-                    textTransform:
-                      "uppercase",
-                  }}
-                >
-                  Keep Going
-                </span>
-
-                <span
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 11,
-                    opacity:
-                      0.75,
-                  }}
-                >
-                  +
-                  {formatPoints(
-                    tapValue
-                  )}
-                </span>
-
-                {state.combo >=
-                  10 && (
-                  <span
-                    style={{
-                      position:
-                        "absolute",
-                      bottom: -23,
-                      fontFamily:
-                        FONT_MONO,
-                      fontSize: 9,
-                      fontWeight: 700,
-                      letterSpacing:
-                        1,
-                    }}
-                  >
-                    MOMENTUM
-                    ACTIVE
-                  </span>
-                )}
-              </motion.button>
-
-              <AnimatePresence>
-                {tapBursts.map(
-                  (b) => (
-                    <motion.div
-                      key={
-                        b.id
-                      }
-                      initial={{
-                        opacity: 1,
-                        y: 0,
-                        scale: b.critical
-                          ? 1.5
-                          : 1,
-                      }}
-                      animate={{
-                        opacity: 0,
-                        y: -58,
-                        scale: 1,
-                      }}
-                      exit={{
-                        opacity: 0,
-                      }}
-                      transition={{
-                        duration:
-                          0.65,
-                        ease: "easeOut",
-                      }}
-                      style={{
-                        position:
-                          "absolute",
-                        left: b.x,
-                        top: b.y,
-                        pointerEvents:
-                          "none",
-                        fontFamily:
-                          FONT_MONO,
-                        fontWeight: 800,
-                        fontSize:
-                          b.critical
-                            ? 18
-                            : 15,
-                        color:
-                          COLORS.chrome,
-                        whiteSpace:
-                          "nowrap",
-                      }}
-                    >
-                      {b.critical
-                        ? "CRIT! "
-                        : "+"}
-                      {formatPoints(
-                        b.value
-                      )}
-                    </motion.div>
-                  )
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* ================================================================
-                SHOP
-            ================================================================= */}
-
-            <div
-              style={{
-                display:
-                  "flex",
-                alignItems:
-                  "center",
-                justifyContent:
-                  "space-between",
-                marginBottom:
-                  10,
-              }}
-            >
-              <span
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize:
-                    10.5,
-                  color:
-                    COLORS.textMuted,
-                  textTransform:
-                    "uppercase",
                   letterSpacing:
-                    1.5,
+                    1.3,
                 }}
               >
-                Upgrade
-              </span>
-
-              <span
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  color:
-                    COLORS.textMuted,
-                }}
-              >
-                BUILD YOUR RUN
-              </span>
-            </div>
-
-            <div
-              style={{
-                display:
-                  "flex",
-                flexDirection:
-                  "column",
-                gap: 10,
-              }}
-            >
-              <ShopCard
-                icon={
-                  <MousePointerClick
-                    size={18}
-                    color={
-                      COLORS.chrome
-                    }
-                  />
-                }
-                title="Tap power"
-                level={
-                  state.tapLevel
-                }
-                description={`Next tap becomes +${formatPoints(
-                  nextTapValue -
-                    tapValue
-                )}`}
-                currentLabel={`+${formatPoints(
-                  tapValue
-                )} / tap`}
-                cost={
-                  tapUpgradeCostNow
-                }
-                canAfford={
-                  state.balance >=
-                  tapUpgradeCostNow
-                }
-                accent={
-                  COLORS.chrome
-                }
-                onBuy={
-                  buyTapUpgrade
-                }
-              />
-
-              <ShopCard
-                icon={
-                  <Zap
-                    size={18}
-                    color="#7fd48a"
-                  />
-                }
-                title="Auto-collect"
-                level={
-                  state.perSecondLevel
-                }
-                description={`Passive income +${formatPoints(
-                  nextPerSecondValue -
-                    perSecondValue
-                )}/sec`}
-                currentLabel={`+${formatPoints(
-                  perSecondValue
-                )} / sec`}
-                cost={
-                  dpsUpgradeCostNow
-                }
-                canAfford={
-                  state.balance >=
-                  dpsUpgradeCostNow
-                }
-                accent="#7fd48a"
-                onBuy={
-                  buyDpsUpgrade
-                }
-              />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ======================================================================
-          MYSTERY REWARD OVERLAY
-      ======================================================================= */}
-
-      <AnimatePresence>
-        {showMystery && (
-          <motion.div
-            initial={{
-              opacity: 0,
-            }}
-            animate={{
-              opacity: 1,
-            }}
-            exit={{
-              opacity: 0,
-            }}
-            style={{
-              position:
-                "absolute",
-              inset: 0,
-              zIndex: 50,
-              display:
-                "flex",
-              alignItems:
-                "center",
-              justifyContent:
-                "center",
-              padding: 10,
-              background:
-                "rgba(0,0,0,0.72)",
-              backdropFilter:
-                "blur(5px)",
-              borderRadius: 8,
-            }}
-          >
-            <motion.div
-              initial={{
-                scale: 0.8,
-                y: 20,
-              }}
-              animate={{
-                scale: 1,
-                y: 0,
-              }}
-              style={{
-                width: "100%",
-                padding:
-                  "24px 18px",
-                borderRadius: 8,
-                background:
-                  COLORS.panel,
-                border: `1px solid ${COLORS.chrome}66`,
-                textAlign:
-                  "center",
-                boxShadow: `0 0 50px ${COLORS.chrome}22`,
-              }}
-            >
-              <motion.div
-                animate={{
-                  rotate: [
-                    -8,
-                    8,
-                    -8,
-                  ],
-                }}
-                transition={{
-                  duration:
-                    1.2,
-                  repeat:
-                    Infinity,
-                }}
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius:
-                    "50%",
-                  margin:
-                    "0 auto 14px",
-                  display:
-                    "flex",
-                  alignItems:
-                    "center",
-                  justifyContent:
-                    "center",
-                  background: `${COLORS.chrome}18`,
-                }}
-              >
-                <Gift
-                  size={25}
-                  color={
-                    COLORS.chrome
-                  }
+                <HelpCircle
+                  size={13}
                 />
-              </motion.div>
 
-              <div
-                style={{
-                  fontFamily:
-                    FONT_MONO,
-                  fontSize: 9,
-                  letterSpacing:
-                    2,
-                  color:
-                    COLORS.textMuted,
-                }}
-              >
-                CHALLENGE COMPLETE
+                YOU DON&apos;T
+                KNOW YET
               </div>
 
               <div
@@ -2207,10 +1330,80 @@ export default function PhaserShooter({
                   fontWeight: 800,
                   color:
                     COLORS.text,
-                  marginTop: 5,
+                  marginTop: 6,
                 }}
               >
-                WHAT&apos;S NEXT?
+                {
+                  experiment.title
+                }
+              </div>
+
+              <div
+                style={{
+                  fontFamily:
+                    FONT_MONO,
+                  fontSize: 11,
+                  color:
+                    COLORS.textMuted,
+                  marginTop: 6,
+                  lineHeight:
+                    1.5,
+                }}
+              >
+                {
+                  experiment.question
+                }
+              </div>
+            </div>
+
+            {/* ============================================================
+                SCENE
+            ============================================================= */}
+
+            <motion.div
+              key={
+                experiment.id
+              }
+              initial={{
+                opacity: 0,
+                scale: 0.98,
+              }}
+              animate={{
+                opacity: 1,
+                scale: 1,
+              }}
+              style={{
+                minHeight: 145,
+                padding:
+                  "18px 16px",
+                borderRadius: 7,
+                background:
+                  COLORS.void,
+                border: `1px solid ${COLORS.panelLine}`,
+                marginBottom: 10,
+                display:
+                  "flex",
+                flexDirection:
+                  "column",
+                justifyContent:
+                  "center",
+              }}
+            >
+              <div
+                style={{
+                  fontFamily:
+                    FONT_DISPLAY,
+                  fontSize: 17,
+                  fontWeight: 700,
+                  color:
+                    COLORS.text,
+                  lineHeight:
+                    1.4,
+                }}
+              >
+                {
+                  experiment.object
+                }
               </div>
 
               <div
@@ -2220,141 +1413,539 @@ export default function PhaserShooter({
                   fontSize: 10,
                   color:
                     COLORS.textMuted,
-                  marginTop: 7,
+                  marginTop: 9,
                   lineHeight:
                     1.5,
                 }}
               >
-                You did it.
-                <br />
-                But there&apos;s
-                another one.
+                {
+                  experiment.atmosphere
+                }
               </div>
 
               <div
                 style={{
-                  marginTop: 18,
-                  padding:
-                    "13px 10px",
-                  borderRadius: 6,
-                  background:
-                    COLORS.void,
-                  border: `1px solid ${COLORS.panelLine}`,
-                }}
-              >
-                <div
-                  style={{
-                    fontFamily:
-                      FONT_MONO,
-                    fontSize: 9,
-                    color:
-                      COLORS.textMuted,
-                  }}
-                >
-                  MYSTERY REWARD
-                </div>
-
-                <div
-                  style={{
-                    fontFamily:
-                      FONT_DISPLAY,
-                    fontSize: 16,
-                    fontWeight: 800,
-                    color:
-                      COLORS.chrome,
-                    marginTop: 4,
-                  }}
-                >
-                  ???
-                </div>
-              </div>
-
-              <button
-                onClick={
-                  claimMystery
-                }
-                style={{
-                  width: "100%",
                   marginTop: 14,
-                  padding:
-                    "13px 0",
-                  borderRadius: 4,
-                  border: "none",
-                  background:
-                    COLORS.chrome,
-                  color:
-                    COLORS.void,
-                  fontFamily:
-                    FONT_DISPLAY,
-                  fontWeight: 800,
-                  fontSize: 12,
-                  letterSpacing:
-                    0.8,
-                  cursor:
-                    "pointer",
                   display:
                     "flex",
                   alignItems:
                     "center",
-                  justifyContent:
-                    "center",
                   gap: 6,
+                  fontFamily:
+                    FONT_MONO,
+                  fontSize: 9,
+                  color:
+                    COLORS.textMuted,
                 }}
               >
-                FIND OUT
-                <ChevronRight
-                  size={14}
+                <Sparkles
+                  size={11}
                 />
-              </button>
+                There may be
+                more than one
+                answer.
+              </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
-      {/* ======================================================================
-          TOAST
-      ======================================================================= */}
+            {/* ============================================================
+                RESULT
+            ============================================================= */}
 
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{
-              opacity: 0,
-              y: -8,
-              x: "-50%",
-            }}
-            animate={{
-              opacity: 1,
-              y: 0,
-              x: "-50%",
-            }}
-            exit={{
-              opacity: 0,
-              y: -8,
-              x: "-50%",
-            }}
-            style={{
-              position:
-                "absolute",
-              top: -6,
-              left: "50%",
-              padding:
-                "8px 14px",
-              borderRadius: 20,
-              background:
-                COLORS.chrome,
-              color:
-                COLORS.void,
-              fontFamily:
-                FONT_MONO,
-              fontSize: 11,
-              fontWeight: 800,
-              whiteSpace:
-                "nowrap",
-              zIndex: 100,
-            }}
-          >
-            {toast}
+            <AnimatePresence mode="wait">
+              {thinking && (
+                <motion.div
+                  key="thinking"
+                  initial={{
+                    opacity: 0,
+                  }}
+                  animate={{
+                    opacity: 1,
+                  }}
+                  exit={{
+                    opacity: 0,
+                  }}
+                  style={{
+                    padding:
+                      "18px",
+                    textAlign:
+                      "center",
+                    borderRadius: 7,
+                    background:
+                      COLORS.panel,
+                    border: `1px solid ${COLORS.panelLine}`,
+                    marginBottom: 10,
+                  }}
+                >
+                  <motion.div
+                    animate={{
+                      rotate: 360,
+                    }}
+                    transition={{
+                      duration: 1,
+                      repeat:
+                        Infinity,
+                      ease:
+                        "linear",
+                    }}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      margin:
+                        "0 auto 8px",
+                      display:
+                        "flex",
+                      alignItems:
+                        "center",
+                      justifyContent:
+                        "center",
+                    }}
+                  >
+                    <Shuffle
+                      size={20}
+                      color={
+                        COLORS.chrome
+                      }
+                    />
+                  </motion.div>
+
+                  <div
+                    style={{
+                      fontFamily:
+                        FONT_MONO,
+                      fontSize: 10,
+                      color:
+                        COLORS.textMuted,
+                    }}
+                  >
+                    SEEING WHAT
+                    HAPPENS...
+                  </div>
+                </motion.div>
+              )}
+
+              {result &&
+                revealed && (
+                  <motion.div
+                    key="result"
+                    initial={{
+                      opacity: 0,
+                      y: 10,
+                    }}
+                    animate={{
+                      opacity: 1,
+                      y: 0,
+                    }}
+                    style={{
+                      padding:
+                        "17px 16px",
+                      borderRadius: 7,
+                      background:
+                        COLORS.panel,
+                      border: `1px solid ${
+                        result.rarity ===
+                        "unknown"
+                          ? COLORS.chrome
+                          : COLORS.panelLine
+                      }`,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display:
+                          "flex",
+                        alignItems:
+                          "center",
+                        justifyContent:
+                          "space-between",
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily:
+                            FONT_MONO,
+                          fontSize: 9,
+                          color:
+                            COLORS.chrome,
+                          letterSpacing:
+                            1.2,
+                        }}
+                      >
+                        {
+                          result.rarity.toUpperCase()
+                        }{" "}
+                        RESULT
+                      </div>
+
+                      <div
+                        style={{
+                          fontFamily:
+                            FONT_MONO,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color:
+                            COLORS.chrome,
+                        }}
+                      >
+                        +
+                        {formatPoints(
+                          result.points
+                        )}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        fontFamily:
+                          FONT_DISPLAY,
+                        fontSize: 18,
+                        fontWeight: 800,
+                        color:
+                          COLORS.text,
+                        marginTop: 7,
+                      }}
+                    >
+                      {
+                        result.title
+                      }
+                    </div>
+
+                    <div
+                      style={{
+                        fontFamily:
+                          FONT_MONO,
+                        fontSize: 10.5,
+                        lineHeight:
+                          1.55,
+                        color:
+                          COLORS.textMuted,
+                        marginTop: 6,
+                      }}
+                    >
+                      {
+                        result.text
+                      }
+                    </div>
+
+                    {result.clue && (
+                      <div
+                        style={{
+                          marginTop: 11,
+                          padding:
+                            "9px 10px",
+                          borderRadius: 5,
+                          background:
+                            COLORS.void,
+                          fontFamily:
+                            FONT_MONO,
+                          fontSize: 9,
+                          color:
+                            COLORS.chrome,
+                          lineHeight:
+                            1.5,
+                        }}
+                      >
+                        <Sparkles
+                          size={11}
+                          style={{
+                            verticalAlign:
+                              "middle",
+                            marginRight:
+                              5,
+                          }}
+                        />
+                        {
+                          result.clue
+                        }
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* ============================================================
+                ACTIONS
+            ============================================================= */}
+
+            {!thinking &&
+              !revealed && (
+                <motion.div
+                  key={
+                    experiment.id
+                  }
+                  initial={{
+                    opacity: 0,
+                    y: 8,
+                  }}
+                  animate={{
+                    opacity: 1,
+                    y: 0,
+                  }}
+                  style={{
+                    display:
+                      "flex",
+                    flexDirection:
+                      "column",
+                    gap: 8,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily:
+                        FONT_MONO,
+                      fontSize: 9,
+                      color:
+                        COLORS.textMuted,
+                      textTransform:
+                        "uppercase",
+                      letterSpacing:
+                        1.2,
+                      marginBottom: 2,
+                    }}
+                  >
+                    What do you try?
+                  </div>
+
+                  {experiment.actions.map(
+                    (
+                      action,
+                      index
+                    ) => (
+                      <motion.button
+                        key={
+                          action.id
+                        }
+                        whileTap={{
+                          scale: 0.98,
+                        }}
+                        onClick={() =>
+                          tryAction(
+                            action.id
+                          )
+                        }
+                        style={{
+                          display:
+                            "flex",
+                          alignItems:
+                            "center",
+                          gap: 11,
+                          padding:
+                            "13px 13px",
+                          borderRadius: 6,
+                          border: `1px solid ${COLORS.panelLine}`,
+                          background:
+                            COLORS.panel,
+                          color:
+                            COLORS.text,
+                          textAlign:
+                            "left",
+                          cursor:
+                            "pointer",
+                          width:
+                            "100%",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 5,
+                            display:
+                              "flex",
+                            alignItems:
+                              "center",
+                            justifyContent:
+                              "center",
+                            background: `${COLORS.chrome}12`,
+                            color:
+                              COLORS.chrome,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {
+                            action.icon
+                          }
+                        </div>
+
+                        <div
+                          style={{
+                            flex: 1,
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontFamily:
+                                FONT_DISPLAY,
+                              fontWeight: 700,
+                              fontSize: 13,
+                            }}
+                          >
+                            {
+                              action.label
+                            }
+                          </div>
+
+                          <div
+                            style={{
+                              fontFamily:
+                                FONT_MONO,
+                              fontSize: 9,
+                              color:
+                                COLORS.textMuted,
+                              marginTop: 2,
+                            }}
+                          >
+                            {
+                              action.description
+                            }
+                          </div>
+                        </div>
+
+                        <span
+                          style={{
+                            fontFamily:
+                              FONT_MONO,
+                            fontSize: 9,
+                            color:
+                              COLORS.textMuted,
+                          }}
+                        >
+                          {
+                            index +
+                              1
+                          }
+                        </span>
+                      </motion.button>
+                    )
+                  )}
+                </motion.div>
+              )}
+
+            {/* ============================================================
+                AFTER RESULT
+            ============================================================= */}
+
+            {revealed &&
+              !thinking && (
+                <div
+                  style={{
+                    display:
+                      "flex",
+                    gap: 8,
+                  }}
+                >
+                  <button
+                    onClick={
+                      restartExperiment
+                    }
+                    style={{
+                      flex: 1,
+                      display:
+                        "flex",
+                      alignItems:
+                        "center",
+                      justifyContent:
+                        "center",
+                      gap: 6,
+                      padding:
+                        "12px 0",
+                      borderRadius: 5,
+                      border: `1px solid ${COLORS.panelLine}`,
+                      background:
+                        COLORS.panel,
+                      color:
+                        COLORS.text,
+                      fontFamily:
+                        FONT_MONO,
+                      fontSize: 10,
+                      cursor:
+                        "pointer",
+                    }}
+                  >
+                    <RotateCcw
+                      size={12}
+                    />
+                    TRY AGAIN
+                  </button>
+
+                  <button
+                    onClick={
+                      nextExperiment
+                    }
+                    style={{
+                      flex: 1.5,
+                      display:
+                        "flex",
+                      alignItems:
+                        "center",
+                      justifyContent:
+                        "center",
+                      gap: 6,
+                      padding:
+                        "12px 0",
+                      borderRadius: 5,
+                      border: "none",
+                      background:
+                        COLORS.chrome,
+                      color:
+                        COLORS.void,
+                      fontFamily:
+                        FONT_DISPLAY,
+                      fontWeight: 800,
+                      fontSize: 11,
+                      cursor:
+                        "pointer",
+                    }}
+                  >
+                    WHAT&apos;S NEXT?
+                    <ArrowRight
+                      size={13}
+                    />
+                  </button>
+                </div>
+              )}
+
+            {/* ============================================================
+                SCORE
+            ============================================================= */}
+
+            <div
+              style={{
+                display:
+                  "flex",
+                justifyContent:
+                  "space-between",
+                marginTop: 14,
+                paddingTop: 12,
+                borderTop: `1px solid ${COLORS.panelLine}`,
+                fontFamily:
+                  FONT_MONO,
+                fontSize: 9,
+                color:
+                  COLORS.textMuted,
+              }}
+            >
+              <span>
+                {formatPoints(
+                  state.points
+                )}{" "}
+                points
+              </span>
+
+              <span>
+                {
+                  state.discoveries
+                }{" "}
+                discoveries
+              </span>
+
+              <span>
+                {
+                  state.experimentsToday
+                }{" "}
+                experiments
+              </span>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -2406,312 +1997,6 @@ export default function PhaserShooter({
 }
 
 // ============================================================================
-// MILESTONE BAR
-// ============================================================================
-
-function MilestoneBar({
-  progressPct,
-  targetBest,
-  milestones,
-}: {
-  progressPct: number;
-  targetBest: number;
-  milestones: Milestones;
-}) {
-  if (targetBest <= 0) {
-    return (
-      <div
-        style={{
-          fontFamily:
-            FONT_MONO,
-          fontSize: 9.5,
-          color:
-            COLORS.textMuted,
-          marginTop: 14,
-        }}
-      >
-        Today&apos;s run becomes
-        tomorrow&apos;s target.
-      </div>
-    );
-  }
-
-  return (
-    <div
-      style={{
-        marginTop: 14,
-      }}
-    >
-      <div
-        style={{
-          position:
-            "relative",
-          height: 7,
-          borderRadius: 4,
-          background:
-            COLORS.void,
-          border: `1px solid ${COLORS.panelLine}`,
-          overflow:
-            "hidden",
-        }}
-      >
-        <motion.div
-          animate={{
-            width: `${
-              progressPct *
-              100
-            }%`,
-          }}
-          style={{
-            height:
-              "100%",
-            background:
-              milestones.m100
-                ? "#7fd48a"
-                : COLORS.chrome,
-          }}
-        />
-      </div>
-
-      <div
-        style={{
-          display:
-            "flex",
-          justifyContent:
-            "space-between",
-          marginTop: 5,
-          fontFamily:
-            FONT_MONO,
-          fontSize: 8.5,
-          color:
-            COLORS.textMuted,
-        }}
-      >
-        <span
-          style={{
-            color:
-              milestones.m50
-                ? COLORS.chrome
-                : COLORS.textMuted,
-          }}
-        >
-          50%
-        </span>
-
-        <span
-          style={{
-            color:
-              milestones.m75
-                ? COLORS.chrome
-                : COLORS.textMuted,
-          }}
-        >
-          75%
-        </span>
-
-        <span
-          style={{
-            color:
-              milestones.m100
-                ? "#7fd48a"
-                : COLORS.textMuted,
-          }}
-        >
-          100%
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// SHOP CARD
-// ============================================================================
-
-function ShopCard({
-  icon,
-  title,
-  level,
-  description,
-  currentLabel,
-  cost,
-  canAfford,
-  accent,
-  onBuy,
-}: {
-  icon: ReactNode;
-  title: string;
-  level: number;
-  description: string;
-  currentLabel: string;
-  cost: number;
-  canAfford: boolean;
-  accent: string;
-  onBuy: () => void;
-}) {
-  return (
-    <motion.button
-      whileTap={
-        canAfford
-          ? {
-              scale: 0.98,
-            }
-          : {}
-      }
-      onClick={onBuy}
-      disabled={!canAfford}
-      style={{
-        display:
-          "flex",
-        alignItems:
-          "center",
-        gap: 12,
-        padding:
-          "14px",
-        borderRadius: 6,
-        border: `1px solid ${accent}44`,
-        background:
-          COLORS.panel,
-        textAlign:
-          "left",
-        cursor:
-          canAfford
-            ? "pointer"
-            : "not-allowed",
-        opacity:
-          canAfford
-            ? 1
-            : 0.5,
-        width:
-          "100%",
-      }}
-    >
-      <div
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 6,
-          display:
-            "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "center",
-          background: `${accent}18`,
-          flexShrink: 0,
-        }}
-      >
-        {icon}
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          minWidth: 0,
-        }}
-      >
-        <div
-          style={{
-            display:
-              "flex",
-            alignItems:
-              "center",
-            gap: 8,
-            fontFamily:
-              FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 14,
-            color:
-              COLORS.text,
-          }}
-        >
-          {title}
-
-          <span
-            style={{
-              fontFamily:
-                FONT_MONO,
-              fontSize: 9,
-              color:
-                COLORS.textMuted,
-              fontWeight: 400,
-            }}
-          >
-            Lv {level}
-          </span>
-        </div>
-
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 10,
-            color:
-              COLORS.textMuted,
-            marginTop: 2,
-            lineHeight:
-              1.4,
-          }}
-        >
-          {description}
-        </div>
-
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9.5,
-            color: accent,
-            marginTop: 4,
-          }}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div
-        style={{
-          textAlign:
-            "right",
-          flexShrink: 0,
-        }}
-      >
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 14,
-            fontWeight: 700,
-            color:
-              canAfford
-                ? accent
-                : COLORS.textMuted,
-          }}
-        >
-          {formatPoints(
-            cost
-          )}
-        </div>
-
-        <div
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 8,
-            color:
-              COLORS.textMuted,
-            textTransform:
-              "uppercase",
-          }}
-        >
-          cost
-        </div>
-      </div>
-    </motion.button>
-  );
-}
-
-// ============================================================================
 // MENU
 // ============================================================================
 
@@ -2722,42 +2007,33 @@ function MenuScreen({
   onStart,
 }: {
   levelInfo: LevelInfo;
-  state: TapGameState;
+  state: GameState;
   hydrated: boolean;
   onStart: () => void;
 }) {
-  const hasProgressToday =
-    state.scoreToday > 0;
-
-  const nextLevelKills =
-    levelInfo.xpForNextLevel -
-    levelInfo.xpIntoLevel;
-
   return (
     <div>
-      {/* ================================================================
-          LEVEL
-      ================================================================= */}
+      {/* LEVEL */}
 
       <div
         style={{
           padding:
-            "18px 16px",
-          borderRadius: 6,
+            "17px 16px",
+          borderRadius: 7,
           background:
             COLORS.panel,
           border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
+          marginBottom: 10,
         }}
       >
         <div
           style={{
             display:
               "flex",
-            alignItems:
-              "center",
             justifyContent:
               "space-between",
+            alignItems:
+              "center",
           }}
         >
           <div
@@ -2770,7 +2046,7 @@ function MenuScreen({
             }}
           >
             <Zap
-              size={17}
+              size={16}
               color={
                 COLORS.chrome
               }
@@ -2780,8 +2056,8 @@ function MenuScreen({
               style={{
                 fontFamily:
                   FONT_DISPLAY,
+                fontSize: 15,
                 fontWeight: 800,
-                fontSize: 16,
                 color:
                   COLORS.text,
               }}
@@ -2804,34 +2080,33 @@ function MenuScreen({
             }}
           >
             {
-              formatMultiplier(
-                levelInfo.multiplier
+              levelInfo.multiplier.toFixed(
+                2
               )
             }
+            ×
           </span>
         </div>
 
         <div
           style={{
-            height: 7,
-            borderRadius: 4,
+            height: 6,
+            borderRadius: 3,
             background:
               COLORS.void,
-            marginTop: 10,
+            marginTop: 9,
             overflow:
               "hidden",
           }}
         >
-          <motion.div
-            animate={{
+          <div
+            style={{
+              height:
+                "100%",
               width: `${
                 levelInfo.progressPct *
                 100
               }%`,
-            }}
-            style={{
-              height:
-                "100%",
               background:
                 COLORS.chrome,
             }}
@@ -2844,10 +2119,10 @@ function MenuScreen({
               "flex",
             justifyContent:
               "space-between",
-            marginTop: 6,
+            marginTop: 5,
             fontFamily:
               FONT_MONO,
-            fontSize: 9,
+            fontSize: 8.5,
             color:
               COLORS.textMuted,
           }}
@@ -2859,75 +2134,26 @@ function MenuScreen({
             /{" "}
             {
               levelInfo.xpForNextLevel
-            } kills
+            }
           </span>
 
           <span>
-            {
-              nextLevelKills
-            } to next
+            2 days / level
           </span>
-        </div>
-
-        <div
-          style={{
-            marginTop: 14,
-            padding:
-              "10px 11px",
-            borderRadius: 5,
-            background:
-              COLORS.void,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9.5,
-            lineHeight:
-              1.5,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          <span
-            style={{
-              color:
-                COLORS.chrome,
-              fontWeight: 700,
-            }}
-          >
-            +2 DAYS
-          </span>{" "}
-          productivity represented
-          by every level.
-          <br />
-          Next level:
-          {" "}
-          <span
-            style={{
-              color:
-                COLORS.text,
-            }}
-          >
-            {
-              formatMultiplier(
-                levelInfo.nextMultiplier
-              )}
-          </span>{" "}
-          power.
         </div>
       </div>
 
-      {/* ================================================================
-          THE HOOK
-      ================================================================= */}
+      {/* CURIOSITY */}
 
       <div
         style={{
           padding:
-            "15px 16px",
-          borderRadius: 6,
+            "18px 16px",
+          borderRadius: 7,
           background:
             COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
+          border: `1px solid ${COLORS.chrome}44`,
+          marginBottom: 10,
         }}
       >
         <div
@@ -2940,7 +2166,7 @@ function MenuScreen({
           }}
         >
           <Sparkles
-            size={16}
+            size={18}
             color={
               COLORS.chrome
             }
@@ -2950,13 +2176,13 @@ function MenuScreen({
             style={{
               fontFamily:
                 FONT_DISPLAY,
-              fontSize: 14,
+              fontSize: 16,
               fontWeight: 800,
               color:
                 COLORS.text,
             }}
           >
-            WHAT&apos;S NEXT?
+            I WONDER...
           </span>
         </div>
 
@@ -2965,159 +2191,167 @@ function MenuScreen({
             fontFamily:
               FONT_MONO,
             fontSize: 10,
-            lineHeight:
-              1.6,
             color:
               COLORS.textMuted,
-            marginTop: 7,
+            lineHeight:
+              1.6,
+            marginTop: 8,
           }}
         >
-          Every challenge reveals
-          another.
+          Every experiment can
+          behave differently.
           <br />
-          You never know exactly
-          what the next run contains.
+          There is no obvious
+          correct button.
+          <br />
+          Try something and find
+          out.
         </div>
+      </div>
 
+      {/* UNKNOWN PREVIEW */}
+
+      <div
+        style={{
+          display:
+            "flex",
+          alignItems:
+            "center",
+          gap: 11,
+          padding:
+            "13px",
+          borderRadius: 6,
+          background:
+            COLORS.void,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 10,
+        }}
+      >
         <div
           style={{
+            width: 35,
+            height: 35,
+            borderRadius: 5,
             display:
               "flex",
             alignItems:
               "center",
-            gap: 7,
-            marginTop: 10,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9.5,
-            color:
-              COLORS.chrome,
+            justifyContent:
+              "center",
+            background: `${COLORS.chrome}12`,
           }}
         >
-          <Target size={12} />
-          I WONDER IF I CAN...
+          <Lock
+            size={16}
+            color={
+              COLORS.chrome
+            }
+          />
         </div>
+
+        <div
+          style={{
+            flex: 1,
+          }}
+        >
+          <div
+            style={{
+              fontFamily:
+                FONT_MONO,
+              fontSize: 9,
+              color:
+                COLORS.textMuted,
+            }}
+          >
+            NEXT RESULT
+          </div>
+
+          <div
+            style={{
+              fontFamily:
+                FONT_DISPLAY,
+              fontSize: 13,
+              fontWeight: 800,
+              color:
+                COLORS.chrome,
+              marginTop: 3,
+            }}
+          >
+            ???
+          </div>
+        </div>
+
+        <Shuffle
+          size={15}
+          color={
+            COLORS.textMuted
+          }
+        />
       </div>
 
-      {/* ================================================================
-          STATS
-      ================================================================= */}
+      {/* STATS */}
 
       <div
         style={{
           display:
             "grid",
           gridTemplateColumns:
-            "1fr 1fr",
-          gap: 10,
-          marginBottom:
-            12,
+            "1fr 1fr 1fr",
+          gap: 7,
+          marginBottom: 10,
         }}
       >
-        <StatCard
+        <MiniStat
           icon={
             <Trophy
-              size={17}
-              color={
-                COLORS.chrome
-              }
+              size={14}
             />
           }
           value={
-            state.personalBest >
-            0
+            state.personalBest
               ? formatPoints(
                   state.personalBest
                 )
               : "—"
           }
-          label="PERSONAL BEST"
+          label="BEST"
         />
 
-        <StatCard
+        <MiniStat
           icon={
-            <Flame
-              size={17}
-              color={
-                COLORS.chrome
-              }
+            <Star size={14} />
+          }
+          value={String(
+            state.discoveries
+          )}
+          label="FOUND"
+        />
+
+        <MiniStat
+          icon={
+            <FlaskConical
+              size={14}
             />
           }
-          value={
-            state.bestCombo
-              ? `${state.bestCombo}×`
-              : "—"
-          }
-          label="BEST COMBO"
+          value={String(
+            state.experimentsToday
+          )}
+          label="TRIED"
         />
       </div>
 
-      {/* ================================================================
-          DAILY PROGRESS
-      ================================================================= */}
-
-      {hasProgressToday && (
-        <div
-          style={{
-            display:
-              "flex",
-            justifyContent:
-              "space-between",
-            padding:
-              "10px 12px",
-            marginBottom:
-              10,
-            borderRadius: 5,
-            background:
-              COLORS.panel,
-            border: `1px solid ${COLORS.panelLine}`,
-            fontFamily:
-              FONT_MONO,
-            fontSize: 9.5,
-            color:
-              COLORS.textMuted,
-          }}
-        >
-          <span>
-            TODAY
-          </span>
-
-          <span
-            style={{
-              color:
-                COLORS.text,
-            }}
-          >
-            {formatPoints(
-              state.scoreToday
-            )}{" "}
-            points
-          </span>
-
-          <span
-            style={{
-              color:
-                COLORS.chrome,
-            }}
-          >
-            {
-              state.challengesCompletedToday
-            }{" "}
-            challenges
-          </span>
-        </div>
-      )}
-
-      {/* ================================================================
-          START
-      ================================================================= */}
+      {/* START */}
 
       <button
         onClick={
           onStart
         }
-        disabled={!hydrated}
+        disabled={
+          !hydrated
+        }
         style={{
+          width:
+            "100%",
           display:
             "flex",
           alignItems:
@@ -3125,11 +2359,9 @@ function MenuScreen({
           justifyContent:
             "center",
           gap: 8,
-          width:
-            "100%",
           padding:
             "14px 0",
-          borderRadius: 4,
+          borderRadius: 5,
           border: "none",
           background:
             COLORS.chrome,
@@ -3137,12 +2369,10 @@ function MenuScreen({
             COLORS.void,
           fontFamily:
             FONT_DISPLAY,
-          fontWeight: 800,
           fontSize: 13,
+          fontWeight: 800,
           letterSpacing:
             0.8,
-          textTransform:
-            "uppercase",
           cursor:
             hydrated
               ? "pointer"
@@ -3156,36 +2386,17 @@ function MenuScreen({
         <Play
           size={14}
         />
-
-        {hasProgressToday
-          ? "Continue Run"
-          : "Start Run"}
+        ENTER THE UNKNOWN
       </button>
-
-      <div
-        style={{
-          textAlign:
-            "center",
-          fontFamily:
-            FONT_MONO,
-          fontSize: 8.5,
-          color:
-            COLORS.textMuted,
-          marginTop: 9,
-        }}
-      >
-        There&apos;s always
-        another one.
-      </div>
     </div>
   );
 }
 
 // ============================================================================
-// STAT CARD
+// MINI STAT
 // ============================================================================
 
-function StatCard({
+function MiniStat({
   icon,
   value,
   label,
@@ -3198,51 +2409,55 @@ function StatCard({
     <div
       style={{
         padding:
-          "12px",
+          "10px 8px",
         borderRadius: 6,
         background:
           COLORS.panel,
         border: `1px solid ${COLORS.panelLine}`,
+        textAlign:
+          "center",
       }}
     >
       <div
         style={{
+          color:
+            COLORS.chrome,
           display:
             "flex",
-          alignItems:
+          justifyContent:
             "center",
-          gap: 7,
         }}
       >
         {icon}
-
-        <span
-          style={{
-            fontFamily:
-              FONT_MONO,
-            fontSize: 8,
-            color:
-              COLORS.textMuted,
-            letterSpacing:
-              0.7,
-          }}
-        >
-          {label}
-        </span>
       </div>
 
       <div
         style={{
           fontFamily:
             FONT_MONO,
-          fontSize: 17,
+          fontSize: 13,
           fontWeight: 800,
           color:
             COLORS.text,
-          marginTop: 7,
+          marginTop: 4,
         }}
       >
         {value}
+      </div>
+
+      <div
+        style={{
+          fontFamily:
+            FONT_MONO,
+          fontSize: 7,
+          color:
+            COLORS.textMuted,
+          marginTop: 2,
+          letterSpacing:
+            0.5,
+        }}
+      >
+        {label}
       </div>
     </div>
   );
