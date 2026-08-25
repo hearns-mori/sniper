@@ -5,27 +5,24 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
   Play,
+  Zap,
+  Trophy,
   Shield,
   Sword,
-  Zap,
   Heart,
-  Flame,
-  Snowflake,
+  Sparkles,
   Skull,
   RefreshCw,
-  Eye,
-  Sparkles,
   ChevronRight,
-  Trophy,
-  Swords,
-  RotateCcw,
   Brain,
-  Crosshair,
+  Dice5,
+  Eye,
+  Flame,
 } from "lucide-react";
 
 import { COLORS, FONT_DISPLAY, FONT_MONO } from "@/lib/theme";
 
-type Phase = "menu" | "build" | "battle" | "result";
+type Phase = "menu" | "draft" | "battle" | "result";
 
 interface PhaserShooterProps {
   /** Lifetime kills across all productivity categories — powers the level. */
@@ -34,107 +31,56 @@ interface PhaserShooterProps {
 }
 
 // ============================================================================
-// TYPES
+// STORAGE
 // ============================================================================
 
-type Element = "fire" | "ice" | "shock" | "void" | "physical";
+const STORAGE_KEY = "tapgame_state_v2";
 
-type Trait =
-  | "berserker"
-  | "guardian"
-  | "vampire"
-  | "glass"
-  | "regenerator"
-  | "thorns"
-  | "evasive"
-  | "unstable";
-
-interface Item {
-  id: string;
-  name: string;
-  icon: string;
-  rarity: "common" | "rare" | "epic" | "legendary";
-  element: Element;
-  description: string;
-
-  attack: number;
-  defense: number;
-  health: number;
-  speed: number;
-  crit: number;
-  lifesteal: number;
-
-  strongAgainst?: Element;
-  weakAgainst?: Element;
+interface SavedState {
+  bestRound: number;
+  totalWins: number;
+  totalRuns: number;
 }
 
-interface Enemy {
-  name: string;
-  title: string;
-  icon: string;
-  element: Element;
-  trait: Trait;
-
-  attack: number;
-  defense: number;
-  health: number;
-  speed: number;
-  crit: number;
-
-  weakness: Element;
-  resistance: Element;
-
-  description: string;
+function defaultSavedState(): SavedState {
+  return {
+    bestRound: 0,
+    totalWins: 0,
+    totalRuns: 0,
+  };
 }
 
-interface BuildStats {
-  attack: number;
-  defense: number;
-  health: number;
-  speed: number;
-  crit: number;
-  lifesteal: number;
+function loadSavedState(): SavedState {
+  if (typeof window === "undefined") return defaultSavedState();
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultSavedState();
+
+    const parsed = JSON.parse(raw) as Partial<SavedState>;
+
+    return {
+      bestRound: parsed.bestRound ?? 0,
+      totalWins: parsed.totalWins ?? 0,
+      totalRuns: parsed.totalRuns ?? 0,
+    };
+  } catch {
+    return defaultSavedState();
+  }
 }
 
-interface BattleLog {
-  text: string;
-  type: "normal" | "good" | "bad" | "critical";
-}
+function saveSavedState(state: SavedState) {
+  if (typeof window === "undefined") return;
 
-interface GameState {
-  discovered: string[];
-  victories: number;
-  defeats: number;
-  bestStreak: number;
-  currentStreak: number;
-}
-
-const STORAGE_KEY = "adaptive_battle_game_v2";
-
-// ============================================================================
-// RANDOMIZATION
-// ============================================================================
-
-function randomInt(min: number, max: number) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function pick<T>(array: T[]): T {
-  return array[Math.floor(Math.random() * array.length)];
-}
-
-function shuffle<T>(array: T[]): T[] {
-  return [...array].sort(() => Math.random() - 0.5);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 // ============================================================================
 // LEVEL SYSTEM
-//
-// Each lifetime kill contributes to level progression.
-// The amount required per level remains stable so that the user's
-// existing lifetimeKills integration remains meaningful.
-//
-// Combat power increases EXPONENTIALLY from level.
 // ============================================================================
 
 interface LevelInfo {
@@ -145,6 +91,7 @@ interface LevelInfo {
 }
 
 function xpForLevel(_level: number): number {
+  // Preserves the existing integration where 521 lifetime kills = 1 level.
   return 521;
 }
 
@@ -157,707 +104,935 @@ function levelFromLifetimeKills(lifetimeKills: number): LevelInfo {
     level++;
   }
 
+  /*
+   * Every level compounds the player's baseline.
+   *
+   * Level 1 = 1.00x
+   * Level 2 = 1.22x
+   * Level 3 = 1.49x
+   * Level 4 = 1.82x
+   * ...
+   *
+   * This makes progressing through productivity levels materially
+   * change what the player can survive.
+   */
+  const powerMultiplier = Math.pow(1.22, level - 1);
+
   return {
     level,
     xpIntoLevel: xp,
     xpForNextLevel: xpForLevel(level),
-
-    // Exponential progression.
-    // Level 1 = 1x
-    // Level 2 = ~1.7x
-    // Level 5 = ~6.8x
-    // Level 10 = ~31x
-    // Level 20 = ~370x
-    powerMultiplier: Math.pow(1.17, level - 1),
+    powerMultiplier,
   };
 }
 
 // ============================================================================
-// ELEMENT SYSTEM
+// TYPES
 // ============================================================================
 
-const ELEMENTS: Record<
-  Element,
-  {
-    label: string;
-    icon: string;
-    color: string;
-    strongAgainst: Element;
-    weakAgainst: Element;
+interface Stats {
+  hp: number;
+  maxHp: number;
+  attack: number;
+  defense: number;
+  dodge: number;
+  crit: number;
+  critDamage: number;
+  damageReduction: number;
+  armorPen: number;
+  lifesteal: number;
+  attackSpeed: number;
+  thorns: number;
+  flatDamageReduction: number;
+  finalDamage: number;
+  healing: number;
+}
+
+interface Card {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  icon: string;
+
+  attack?: number;
+  attackMultiplier?: number;
+  defense?: number;
+  hp?: number;
+  hpMultiplier?: number;
+  dodge?: number;
+  crit?: number;
+  critDamage?: number;
+  damageReduction?: number;
+  armorPen?: number;
+  lifesteal?: number;
+  attackSpeed?: number;
+  thorns?: number;
+  flatDamageReduction?: number;
+  finalDamage?: number;
+  healing?: number;
+}
+
+interface Enemy {
+  name: string;
+  title: string;
+  stats: Stats;
+  cards: Card[];
+  visualSeed: number;
+}
+
+interface BattleLog {
+  attacker: "player" | "enemy";
+  text: string;
+  damage?: number;
+  critical?: boolean;
+  dodged?: boolean;
+}
+
+interface RunState {
+  round: number;
+  checkpoint: number;
+  playerStats: Stats;
+  playerCards: Card[];
+  enemy: Enemy | null;
+}
+
+// ============================================================================
+// RANDOM
+// ============================================================================
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function randomFloat(min: number, max: number): number {
+  return Math.random() * (max - min) + min;
+}
+
+function pick<T>(array: T[]): T {
+  return array[Math.floor(Math.random() * array.length)];
+}
+
+function shuffle<T>(array: T[]): T[] {
+  const copy = [...array];
+
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
   }
-> = {
-  fire: {
-    label: "Fire",
-    icon: "🔥",
-    color: "#ff795f",
-    strongAgainst: "ice",
-    weakAgainst: "water" as Element,
-  },
 
-  ice: {
-    label: "Ice",
-    icon: "❄️",
-    color: "#76c9ff",
-    strongAgainst: "shock",
-    weakAgainst: "fire",
-  },
-
-  shock: {
-    label: "Shock",
-    icon: "⚡",
-    color: "#e5c75f",
-    strongAgainst: "physical",
-    weakAgainst: "ice",
-  },
-
-  void: {
-    label: "Void",
-    icon: "◈",
-    color: "#c18cff",
-    strongAgainst: "fire",
-    weakAgainst: "physical",
-  },
-
-  physical: {
-    label: "Steel",
-    icon: "⚔️",
-    color: COLORS.chrome,
-    strongAgainst: "void",
-    weakAgainst: "shock",
-  },
-};
+  return copy;
+}
 
 // ============================================================================
-// ITEM DATABASE
-//
-// Items are intentionally asymmetric.
-// There is no single universally best item.
+// CARD POOL
 // ============================================================================
 
-const ITEM_POOL: Item[] = [
+const CARD_POOL: Card[] = [
   {
-    id: "iron-sword",
-    name: "Iron Fang",
+    id: "berserker",
+    name: "Berserker",
+    description: "+100% attack, but -15% defense.",
+    category: "OFFENSE",
     icon: "⚔️",
-    rarity: "common",
-    element: "physical",
-    description: "Reliable damage. Nothing fancy.",
-    attack: 18,
-    defense: 2,
-    health: 0,
-    speed: 0,
-    crit: 3,
-    lifesteal: 0,
+    attackMultiplier: 2,
+    defense: -15,
   },
   {
-    id: "thorn-armor",
-    name: "Thorn Shell",
-    icon: "🌵",
-    rarity: "rare",
-    element: "physical",
-    description: "Turns defense into punishment.",
-    attack: 4,
-    defense: 22,
-    health: 18,
-    speed: -2,
-    crit: 0,
-    lifesteal: 0,
+    id: "executioner",
+    name: "Executioner",
+    description: "+50% final damage against enemies below 50% HP.",
+    category: "OFFENSE",
+    icon: "🪓",
+    finalDamage: 50,
   },
   {
-    id: "flame-core",
-    name: "Flame Core",
-    icon: "🔥",
-    rarity: "rare",
-    element: "fire",
-    description: "Huge offensive pressure.",
-    attack: 31,
-    defense: -5,
-    health: 0,
-    speed: 2,
-    crit: 6,
-    lifesteal: 0,
-    strongAgainst: "ice",
-    weakAgainst: "void",
-  },
-  {
-    id: "frost-heart",
-    name: "Frost Heart",
-    icon: "❄️",
-    rarity: "rare",
-    element: "ice",
-    description: "Slow, durable and difficult to break.",
-    attack: 9,
-    defense: 19,
-    health: 35,
-    speed: -4,
-    crit: 0,
-    lifesteal: 2,
-    strongAgainst: "shock",
-    weakAgainst: "fire",
-  },
-  {
-    id: "storm-engine",
-    name: "Storm Engine",
-    icon: "⚡",
-    rarity: "epic",
-    element: "shock",
-    description: "Speed creates explosive openings.",
-    attack: 20,
-    defense: 2,
-    health: 0,
-    speed: 18,
-    crit: 12,
-    lifesteal: 0,
-    strongAgainst: "physical",
-    weakAgainst: "ice",
-  },
-  {
-    id: "void-mask",
-    name: "Void Mask",
-    icon: "🎭",
-    rarity: "epic",
-    element: "void",
-    description: "Sacrifice defense for strange power.",
-    attack: 26,
-    defense: -8,
-    health: -10,
-    speed: 15,
-    crit: 15,
-    lifesteal: 5,
-    strongAgainst: "fire",
-    weakAgainst: "physical",
-  },
-  {
-    id: "blood-crown",
-    name: "Blood Crown",
-    icon: "👑",
-    rarity: "legendary",
-    element: "void",
-    description: "Every hit becomes a little more dangerous.",
-    attack: 23,
-    defense: 5,
-    health: 15,
-    speed: 8,
-    crit: 8,
-    lifesteal: 18,
+    id: "double-edge",
+    name: "Double Edge",
+    description: "+150 attack. +10% crit. -10% max HP.",
+    category: "OFFENSE",
+    icon: "🩸",
+    attack: 150,
+    crit: 10,
+    hpMultiplier: 0.9,
   },
   {
     id: "glass-cannon",
     name: "Glass Cannon",
-    icon: "💎",
-    rarity: "epic",
-    element: "fire",
-    description: "Ridiculous offense. Almost no forgiveness.",
-    attack: 54,
-    defense: -25,
-    health: -25,
-    speed: 5,
+    description: "×2.5 attack. Your defense is reduced by 35%.",
+    category: "OFFENSE",
+    icon: "💥",
+    attackMultiplier: 2.5,
+    defense: -35,
+  },
+  {
+    id: "critical-core",
+    name: "Critical Core",
+    description: "+30% critical chance and +75% critical damage.",
+    category: "CRIT",
+    icon: "🎯",
+    crit: 30,
+    critDamage: 75,
+  },
+  {
+    id: "lucky-strike",
+    name: "Lucky Strike",
+    description: "+15% dodge and +20% crit.",
+    category: "CRIT",
+    icon: "🍀",
+    dodge: 15,
     crit: 20,
-    lifesteal: 0,
-    strongAgainst: "ice",
-    weakAgainst: "void",
   },
   {
-    id: "gravity-plate",
-    name: "Gravity Plate",
+    id: "iron-wall",
+    name: "Iron Wall",
+    description: "+50% final damage reduction.",
+    category: "DEFENSE",
     icon: "🛡️",
-    rarity: "legendary",
-    element: "physical",
-    description: "Almost impossible to move.",
-    attack: 5,
-    defense: 45,
-    health: 55,
-    speed: -18,
-    crit: 0,
-    lifesteal: 0,
-    strongAgainst: "void",
-    weakAgainst: "shock",
+    damageReduction: 50,
   },
   {
-    id: "phantom-cloak",
-    name: "Phantom Cloak",
-    icon: "🪽",
-    rarity: "legendary",
-    element: "void",
-    description: "Avoid the hit instead of surviving it.",
-    attack: 12,
-    defense: 8,
-    health: 10,
-    speed: 35,
-    crit: 9,
-    lifesteal: 4,
-    strongAgainst: "fire",
-    weakAgainst: "physical",
+    id: "fortress",
+    name: "Fortress",
+    description: "+300 defense and +500 HP.",
+    category: "DEFENSE",
+    icon: "🏰",
+    defense: 300,
+    hp: 500,
+  },
+  {
+    id: "evasion",
+    name: "Phantom Step",
+    description: "+25% dodge.",
+    category: "DEFENSE",
+    icon: "👻",
+    dodge: 25,
+  },
+  {
+    id: "untouchable",
+    name: "Untouchable",
+    description: "+40% dodge, but -20% attack.",
+    category: "DEFENSE",
+    icon: "🌫️",
+    dodge: 40,
+    attackMultiplier: 0.8,
+  },
+  {
+    id: "vampire",
+    name: "Vampire",
+    description: "Recover 15% of damage dealt as HP.",
+    category: "SUSTAIN",
+    icon: "🧛",
+    lifesteal: 15,
+  },
+  {
+    id: "regenerator",
+    name: "Regenerator",
+    description: "Recover 3% max HP every turn.",
+    category: "SUSTAIN",
+    icon: "💚",
+    healing: 3,
+  },
+  {
+    id: "blood-furnace",
+    name: "Blood Furnace",
+    description: "+20% lifesteal and +100 attack.",
+    category: "SUSTAIN",
+    icon: "🔥",
+    lifesteal: 20,
+    attack: 100,
+  },
+  {
+    id: "thorns",
+    name: "Thorns",
+    description: "Reflect 25% of incoming damage.",
+    category: "SUSTAIN",
+    icon: "🌵",
+    thorns: 25,
+  },
+  {
+    id: "armor-piercer",
+    name: "Armor Piercer",
+    description: "Ignore 50% of enemy defense.",
+    category: "UTILITY",
+    icon: "🏹",
+    armorPen: 50,
+  },
+  {
+    id: "absolute-piercer",
+    name: "Absolute Piercer",
+    description: "Ignore 90% of enemy damage reduction.",
+    category: "UTILITY",
+    icon: "🗡️",
+    armorPen: 90,
+  },
+  {
+    id: "momentum",
+    name: "Momentum",
+    description: "+20% attack speed. Each consecutive hit adds +5% damage.",
+    category: "UTILITY",
+    icon: "⚡",
+    attackSpeed: 20,
+  },
+  {
+    id: "overclock",
+    name: "Overclock",
+    description: "+50% attack speed and +25% attack.",
+    category: "UTILITY",
+    icon: "🚀",
+    attackSpeed: 50,
+    attackMultiplier: 1.25,
+  },
+  {
+    id: "heavy-blow",
+    name: "Heavy Blow",
+    description: "+400 attack, but -25% attack speed.",
+    category: "OFFENSE",
+    icon: "🔨",
+    attack: 400,
+    attackSpeed: -25,
+  },
+  {
+    id: "fortified-heart",
+    name: "Fortified Heart",
+    description: "+1000 HP and +10% damage reduction.",
+    category: "DEFENSE",
+    icon: "❤️",
+    hp: 1000,
+    damageReduction: 10,
+  },
+  {
+    id: "counter",
+    name: "Counterstance",
+    description: "+15% dodge and +20% thorns.",
+    category: "DEFENSE",
+    icon: "🥋",
+    dodge: 15,
+    thorns: 20,
+  },
+  {
+    id: "true-power",
+    name: "True Power",
+    description: "+250 attack and ignore 25% defense.",
+    category: "UTILITY",
+    icon: "✨",
+    attack: 250,
+    armorPen: 25,
+  },
+  {
+    id: "survivalist",
+    name: "Survivalist",
+    description: "+25% max HP and +10% healing.",
+    category: "SUSTAIN",
+    icon: "🧬",
+    hpMultiplier: 1.25,
+    healing: 10,
+  },
+  {
+    id: "glass-heart",
+    name: "Glass Heart",
+    description: "×1.8 max HP, but -20% attack.",
+    category: "SUSTAIN",
+    icon: "💎",
+    hpMultiplier: 1.8,
+    attackMultiplier: 0.8,
+  },
+  {
+    id: "annihilator",
+    name: "Annihilator",
+    description: "+75% final damage and +200 attack.",
+    category: "OFFENSE",
+    icon: "☄️",
+    finalDamage: 75,
+    attack: 200,
+  },
+  {
+    id: "last-stand",
+    name: "Last Stand",
+    description: "When below 25% HP, gain +100% attack.",
+    category: "SPECIAL",
+    icon: "☠️",
+    attackMultiplier: 2,
+  },
+  {
+    id: "mirage",
+    name: "Mirage",
+    description: "+30% dodge. Every dodge restores 5% max HP.",
+    category: "SPECIAL",
+    icon: "🌀",
+    dodge: 30,
+    healing: 5,
+  },
+  {
+    id: "juggernaut",
+    name: "Juggernaut",
+    description: "+60% damage reduction, but -35% dodge.",
+    category: "DEFENSE",
+    icon: "🤖",
+    damageReduction: 60,
+    dodge: -35,
+  },
+  {
+    id: "glass-blade",
+    name: "Glass Blade",
+    description: "×3 attack, but -40% max HP.",
+    category: "OFFENSE",
+    icon: "🔪",
+    attackMultiplier: 3,
+    hpMultiplier: 0.6,
+  },
+  {
+    id: "immovable",
+    name: "Immovable",
+    description: "+1000 defense and +20% damage reduction.",
+    category: "DEFENSE",
+    icon: "🗿",
+    defense: 1000,
+    damageReduction: 20,
   },
 ];
+
+// ============================================================================
+// BASE STATS
+// ============================================================================
+
+function basePlayerStats(level: LevelInfo): Stats {
+  const m = level.powerMultiplier;
+
+  return {
+    hp: Math.round(1000 * m),
+    maxHp: Math.round(1000 * m),
+    attack: Math.round(100 * m),
+    defense: Math.round(100 * m),
+    dodge: 5,
+    crit: 5,
+    critDamage: 100,
+    damageReduction: 0,
+    armorPen: 0,
+    lifesteal: 0,
+    attackSpeed: 100,
+    thorns: 0,
+    flatDamageReduction: 0,
+    finalDamage: 0,
+    healing: 0,
+  };
+}
+
+// ============================================================================
+// APPLY CARDS
+// ============================================================================
+
+function applyCard(stats: Stats, card: Card): Stats {
+  const next = { ...stats };
+
+  if (card.attack) next.attack += card.attack;
+  if (card.defense) next.defense += card.defense;
+  if (card.hp) {
+    next.hp += card.hp;
+    next.maxHp += card.hp;
+  }
+
+  if (card.attackMultiplier) {
+    next.attack *= card.attackMultiplier;
+  }
+
+  if (card.hpMultiplier) {
+    next.maxHp *= card.hpMultiplier;
+    next.hp *= card.hpMultiplier;
+  }
+
+  if (card.dodge) next.dodge += card.dodge;
+  if (card.crit) next.crit += card.crit;
+  if (card.critDamage) next.critDamage += card.critDamage;
+  if (card.damageReduction) next.damageReduction += card.damageReduction;
+  if (card.armorPen) next.armorPen += card.armorPen;
+  if (card.lifesteal) next.lifesteal += card.lifesteal;
+  if (card.attackSpeed) next.attackSpeed += card.attackSpeed;
+  if (card.thorns) next.thorns += card.thorns;
+  if (card.flatDamageReduction) next.flatDamageReduction += card.flatDamageReduction;
+  if (card.finalDamage) next.finalDamage += card.finalDamage;
+  if (card.healing) next.healing += card.healing;
+
+  next.maxHp = Math.max(1, Math.round(next.maxHp));
+  next.hp = Math.min(next.maxHp, Math.max(1, Math.round(next.hp)));
+  next.attack = Math.max(1, Math.round(next.attack));
+  next.defense = Math.max(0, Math.round(next.defense));
+  next.dodge = Math.min(75, Math.max(0, next.dodge));
+  next.crit = Math.min(100, Math.max(0, next.crit));
+  next.damageReduction = Math.min(90, Math.max(0, next.damageReduction));
+  next.armorPen = Math.min(100, Math.max(0, next.armorPen));
+  next.lifesteal = Math.min(100, Math.max(0, next.lifesteal));
+  next.attackSpeed = Math.max(25, next.attackSpeed);
+  next.thorns = Math.min(100, Math.max(0, next.thorns));
+
+  return next;
+}
+
+function buildStats(base: Stats, cards: Card[]): Stats {
+  return cards.reduce(applyCard, { ...base });
+}
 
 // ============================================================================
 // ENEMY GENERATION
-//
-// Every run generates a different enemy combination.
 // ============================================================================
 
 const ENEMY_NAMES = [
-  "Morrow",
-  "Vex",
-  "Ruin",
-  "Kairo",
-  "Nyx",
-  "Sol",
-  "Axiom",
-  "Grim",
-  "Echo",
-  "Rook",
-  "Vale",
-  "Nero",
+  "The Gambler",
+  "Iron Wraith",
+  "Void Hunter",
+  "Glass King",
+  "Blood Beast",
+  "The Architect",
+  "Phantom",
+  "Storm Bringer",
+  "The Collector",
+  "Chaos Knight",
+  "Red Machine",
+  "Unknown",
 ];
 
 const ENEMY_TITLES = [
-  "the Unfinished",
-  "the Hungry",
-  "the Counter",
-  "the Wanderer",
-  "the Unstable",
-  "the Silent",
-  "the Collector",
-  "the Broken",
-  "the Patient",
-  "the Gambler",
+  "reads your build",
+  "came prepared",
+  "is hiding something",
+  "looks unusually strong",
+  "has an unstable build",
+  "chose chaos",
+  "is adapting",
+  "doesn't play fair",
 ];
 
-const ENEMY_ICONS = ["👹", "🧿", "🤖", "👾", "☠️", "🦂", "🦾", "🐉", "🕷️"];
+function generateEnemy(round: number, level: LevelInfo): Enemy {
+  /*
+   * Enemy strength increases exponentially with the round,
+   * while the exact composition is randomized every time.
+   */
+  const roundPower = Math.pow(1.16, round - 1);
+  const levelPower = level.powerMultiplier;
 
-const TRAITS: Trait[] = [
-  "berserker",
-  "guardian",
-  "vampire",
-  "glass",
-  "regenerator",
-  "thorns",
-  "evasive",
-  "unstable",
-];
+  const base: Stats = {
+    hp: Math.round(1000 * levelPower * roundPower * randomFloat(0.8, 1.3)),
+    maxHp: 0,
+    attack: Math.round(100 * levelPower * roundPower * randomFloat(0.8, 1.35)),
+    defense: Math.round(100 * levelPower * roundPower * randomFloat(0.7, 1.4)),
+    dodge: randomFloat(0, 20),
+    crit: randomFloat(0, 25),
+    critDamage: 100,
+    damageReduction: 0,
+    armorPen: 0,
+    lifesteal: 0,
+    attackSpeed: randomFloat(75, 130),
+    thorns: 0,
+    flatDamageReduction: 0,
+    finalDamage: 0,
+    healing: 0,
+  };
 
-const TRAIT_TEXT: Record<Trait, string> = {
-  berserker: "Gets stronger as health falls.",
-  guardian: "Takes significantly reduced damage.",
-  vampire: "Heals from every successful attack.",
-  glass: "Extremely dangerous but extremely fragile.",
-  regenerator: "Slowly regenerates health.",
-  thorns: "Damages attackers whenever struck.",
-  evasive: "Sometimes completely avoids attacks.",
-  unstable: "Randomly becomes much stronger or weaker.",
-};
+  base.maxHp = base.hp;
 
-function generateEnemy(level: number): Enemy {
-  const element = pick(Object.keys(ELEMENTS) as Element[]);
-
-  const possibleWeaknesses = (Object.keys(ELEMENTS) as Element[]).filter(
-    (e) => e !== element
+  /*
+   * Enemy gets a random number of cards.
+   * Later rounds can produce nastier builds.
+   */
+  const cardCount = Math.min(
+    5,
+    1 + Math.floor((round - 1) / 2)
   );
 
-  const weakness = pick(possibleWeaknesses);
-
-  const possibleResistances = (Object.keys(ELEMENTS) as Element[]).filter(
-    (e) => e !== element && e !== weakness
-  );
-
-  const resistance = pick(possibleResistances);
-
-  const trait = pick(TRAITS);
-
-  const difficulty = Math.pow(1.145, Math.max(0, level - 1));
-
-  let health = 130 * difficulty;
-  let attack = 18 * difficulty;
-  let defense = 8 * difficulty;
-  let speed = 10 + level * 0.7;
-  let crit = 4;
-
-  switch (trait) {
-    case "berserker":
-      attack *= 1.28;
-      health *= 0.9;
-      break;
-
-    case "guardian":
-      defense *= 1.55;
-      health *= 1.18;
-      attack *= 0.82;
-      break;
-
-    case "vampire":
-      attack *= 1.05;
-      health *= 1.1;
-      break;
-
-    case "glass":
-      attack *= 1.65;
-      health *= 0.58;
-      defense *= 0.65;
-      crit += 15;
-      break;
-
-    case "regenerator":
-      health *= 1.28;
-      defense *= 1.05;
-      break;
-
-    case "thorns":
-      defense *= 1.25;
-      health *= 1.15;
-      break;
-
-    case "evasive":
-      speed *= 1.5;
-      health *= 0.92;
-      break;
-
-    case "unstable":
-      if (Math.random() > 0.5) {
-        attack *= 1.6;
-        health *= 0.75;
-      } else {
-        attack *= 0.75;
-        health *= 1.55;
-      }
-      break;
-  }
+  const cards = shuffle(CARD_POOL).slice(0, cardCount);
+  const stats = buildStats(base, cards);
 
   return {
     name: pick(ENEMY_NAMES),
     title: pick(ENEMY_TITLES),
-    icon: pick(ENEMY_ICONS),
-    element,
-    trait,
-    attack,
-    defense,
-    health,
-    speed,
-    crit,
-    weakness,
-    resistance,
-    description: TRAIT_TEXT[trait],
+    stats,
+    cards,
+    visualSeed: randomInt(1, 999999),
   };
 }
 
 // ============================================================================
-// BUILD GENERATION
+// BATTLE ENGINE
 // ============================================================================
 
-function generateChoices(enemy: Enemy): Item[] {
-  // Occasionally produce a deliberately strange set where the player
-  // has to reason about tradeoffs rather than simply choosing the highest
-  // number.
-  const candidates = shuffle(ITEM_POOL);
-
-  const guaranteedCounter = candidates.find(
-    (item) =>
-      item.element === enemy.weakness ||
-      item.strongAgainst === enemy.element
-  );
-
-  const guaranteedDefense = candidates.find(
-    (item) => item.defense >= 20 || item.health >= 30
-  );
-
-  const weirdChoice = candidates.find(
-    (item) =>
-      item.defense < 0 ||
-      item.health < 0 ||
-      item.speed >= 30
-  );
-
-  const randomChoices = candidates.slice(0, 5);
-
-  const combined = [
-    guaranteedCounter,
-    guaranteedDefense,
-    weirdChoice,
-    ...randomChoices,
-  ].filter(Boolean) as Item[];
-
-  return shuffle(
-    combined.filter(
-      (item, index, arr) => arr.findIndex((x) => x.id === item.id) === index
-    )
-  ).slice(0, 5);
+function effectiveDefense(defense: number, armorPen: number): number {
+  return Math.max(0, defense * (1 - armorPen / 100));
 }
 
-// ============================================================================
-// COMBAT
-// ============================================================================
+function calculateDamage(
+  attacker: Stats,
+  defender: Stats,
+  defenderHp: number
+): {
+  damage: number;
+  critical: boolean;
+} {
+  let attack = attacker.attack;
 
-function calculateBuildStats(
-  items: Item[],
-  levelInfo: LevelInfo
-): BuildStats {
-  const base: BuildStats = {
-    attack: 20,
-    defense: 10,
-    health: 120,
-    speed: 10,
-    crit: 5,
-    lifesteal: 0,
-  };
-
-  for (const item of items) {
-    base.attack += item.attack;
-    base.defense += item.defense;
-    base.health += item.health;
-    base.speed += item.speed;
-    base.crit += item.crit;
-    base.lifesteal += item.lifesteal;
+  if (attacker === undefined) {
+    attack = 1;
   }
 
-  // Exponential level scaling.
-  base.attack *= levelInfo.powerMultiplier;
-  base.defense *= levelInfo.powerMultiplier;
-  base.health *= levelInfo.powerMultiplier;
-  base.speed *= Math.pow(levelInfo.powerMultiplier, 0.35);
+  // Last Stand
+  if (attacker.hp <= attacker.maxHp * 0.25) {
+    attack *= 2;
+  }
+
+  const critical = Math.random() * 100 < attacker.crit;
+
+  if (critical) {
+    attack *= 1 + attacker.critDamage / 100;
+  }
+
+  const defense = effectiveDefense(defender.defense, attacker.armorPen);
+
+  /*
+   * Defense follows diminishing returns.
+   * This means stacking defense is powerful but never becomes absolute.
+   */
+  const defenseMultiplier = 100 / (100 + defense);
+
+  let damage = attack * defenseMultiplier;
+
+  /*
+   * Final damage modifiers.
+   */
+  damage *= 1 + attacker.finalDamage / 100;
+
+  /*
+   * Executioner.
+   */
+  if (defenderHp <= defender.maxHp * 0.5) {
+    const executioner = false;
+    if (executioner) {
+      damage *= 1.5;
+    }
+  }
+
+  /*
+   * Defender's final damage reduction.
+   * Attacker armor penetration can partially ignore it.
+   */
+  const remainingReduction =
+    defender.damageReduction *
+    (1 - attacker.armorPen / 100);
+
+  damage *= Math.max(0.05, 1 - remainingReduction / 100);
+
+  damage -= defender.flatDamageReduction;
 
   return {
-    attack: Math.max(1, base.attack),
-    defense: Math.max(0, base.defense),
-    health: Math.max(20, base.health),
-    speed: Math.max(1, base.speed),
-    crit: Math.max(0, base.crit),
-    lifesteal: Math.max(0, base.lifesteal),
+    damage: Math.max(1, Math.round(damage)),
+    critical,
   };
 }
 
-function elementMultiplier(
-  attacker: Element,
-  defender: Element,
-  enemyWeakness?: Element,
-  enemyResistance?: Element
-) {
-  let multiplier = 1;
-
-  if (ELEMENTS[attacker].strongAgainst === defender) {
-    multiplier *= 1.35;
-  }
-
-  if (ELEMENTS[attacker].weakAgainst === defender) {
-    multiplier *= 0.72;
-  }
-
-  if (enemyWeakness === attacker) {
-    multiplier *= 1.45;
-  }
-
-  if (enemyResistance === attacker) {
-    multiplier *= 0.62;
-  }
-
-  return multiplier;
-}
-
-function runBattle(
-  build: BuildStats,
-  buildElement: Element,
-  enemy: Enemy
-): { playerWon: boolean; logs: BattleLog[]; turns: number } {
-  let playerHP = build.health;
-  let enemyHP = enemy.health;
+function simulateBattle(
+  originalPlayer: Stats,
+  originalEnemy: Stats
+): {
+  playerWon: boolean;
+  player: Stats;
+  enemy: Stats;
+  logs: BattleLog[];
+  turns: number;
+} {
+  const player = { ...originalPlayer };
+  const enemy = { ...originalEnemy };
 
   const logs: BattleLog[] = [];
 
-  let turn = 0;
+  let playerHp = player.maxHp;
+  let enemyHp = enemy.maxHp;
 
-  while (playerHP > 0 && enemyHP > 0 && turn < 80) {
+  let turn = 0;
+  let playerStreak = 0;
+  let enemyStreak = 0;
+
+  /*
+   * Attack speed determines who gets more attacks.
+   * 100 = normal.
+   */
+  const playerInterval = 100 / Math.max(25, player.attackSpeed);
+  const enemyInterval = 100 / Math.max(25, enemy.attackSpeed);
+
+  let playerTimer = 0;
+  let enemyTimer = 0;
+
+  while (playerHp > 0 && enemyHp > 0 && turn < 100) {
     turn++;
 
-    const playerFirst = build.speed >= enemy.speed;
+    playerTimer += 1;
+    enemyTimer += 1;
 
-    const attacks = playerFirst
-      ? ["player", "enemy"]
-      : ["enemy", "player"];
+    const playerActs = playerTimer >= playerInterval;
+    const enemyActs = enemyTimer >= enemyInterval;
 
-    for (const attacker of attacks) {
-      if (playerHP <= 0 || enemyHP <= 0) break;
+    if (playerActs) playerTimer = 0;
+    if (enemyActs) enemyTimer = 0;
 
-      if (attacker === "player") {
-        if (enemy.trait === "evasive" && Math.random() < 0.16) {
-          logs.push({
-            text: `${enemy.name} vanished before the attack landed.`,
-            type: "bad",
-          });
-          continue;
-        }
-
-        const crit = Math.random() * 100 < build.crit;
-
-        let damage =
-          build.attack *
-          elementMultiplier(
-            buildElement,
-            enemy.element,
-            enemy.weakness,
-            enemy.resistance
-          );
-
-        damage *= crit ? 1.8 : 1;
-
-        damage = Math.max(
-          1,
-          damage - enemy.defense * 0.35
-        );
-
-        enemyHP -= damage;
-
-        if (crit) {
-          logs.push({
-            text: `CRITICAL HIT — ${Math.round(damage)} damage.`,
-            type: "critical",
-          });
-        } else {
-          logs.push({
-            text: `You deal ${Math.round(damage)} damage.`,
-            type: "normal",
-          });
-        }
-
-        if (build.lifesteal > 0) {
-          const heal = damage * (build.lifesteal / 100);
-          playerHP = Math.min(build.health, playerHP + heal);
-        }
-
-        if (enemy.trait === "thorns" && enemyHP > 0) {
-          const thorn = Math.max(1, enemy.defense * 0.22);
-          playerHP -= thorn;
-
-          logs.push({
-            text: `Thorns return ${Math.round(thorn)} damage.`,
-            type: "bad",
-          });
-        }
-      } else {
-        if (Math.random() < build.speed / (build.speed + 220)) {
-          logs.push({
-            text: "You dodged the attack.",
-            type: "good",
-          });
-          continue;
-        }
-
-        let enemyAttack = enemy.attack;
-
-        if (enemy.trait === "berserker") {
-          const missing = 1 - enemyHP / enemy.health;
-          enemyAttack *= 1 + missing * 1.1;
-        }
-
-        if (enemy.trait === "unstable") {
-          enemyAttack *= Math.random() > 0.5 ? 1.5 : 0.65;
-        }
-
-        const crit = Math.random() * 100 < enemy.crit;
-
-        let damage =
-          enemyAttack *
-          elementMultiplier(
-            enemy.element,
-            buildElement
-          );
-
-        damage *= crit ? 1.65 : 1;
-
-        damage = Math.max(
-          1,
-          damage - build.defense * 0.3
-        );
-
-        playerHP -= damage;
+    if (playerActs && enemyHp > 0) {
+      if (Math.random() * 100 < enemy.dodge) {
+        playerStreak = 0;
 
         logs.push({
-          text: crit
-            ? `CRITICAL — enemy deals ${Math.round(damage)} damage.`
-            : `Enemy deals ${Math.round(damage)} damage.`,
-          type: crit ? "bad" : "normal",
+          attacker: "player",
+          text: "Enemy dodged your attack.",
+          dodged: true,
+        });
+      } else {
+        playerStreak++;
+
+        const streakMultiplier = 1 + Math.min(0.5, (playerStreak - 1) * 0.05);
+
+        const adjustedPlayer = {
+          ...player,
+          attack: player.attack * streakMultiplier,
+        };
+
+        const result = calculateDamage(
+          adjustedPlayer,
+          enemy,
+          enemyHp
+        );
+
+        enemyHp -= result.damage;
+
+        const healing =
+          result.damage * (player.lifesteal / 100);
+
+        playerHp = Math.min(
+          player.maxHp,
+          playerHp + healing
+        );
+
+        logs.push({
+          attacker: "player",
+          text: `You hit for ${result.damage}${result.critical ? " CRIT" : ""}.`,
+          damage: result.damage,
+          critical: result.critical,
         });
 
-        if (enemy.trait === "vampire") {
-          const heal = damage * 0.18;
-          enemyHP = Math.min(enemy.health, enemyHP + heal);
+        /*
+         * Thorns.
+         */
+        if (enemy.thorns > 0 && enemyHp > 0) {
+          const reflected =
+            Math.max(1, Math.round(result.damage * enemy.thorns / 100));
+
+          playerHp -= reflected;
 
           logs.push({
-            text: `${enemy.name} drains ${Math.round(heal)} health.`,
-            type: "bad",
+            attacker: "enemy",
+            text: `Thorns reflected ${reflected}.`,
+            damage: reflected,
           });
         }
       }
     }
 
-    if (enemy.trait === "regenerator" && enemyHP > 0) {
-      const heal = enemy.health * 0.018;
-      enemyHP = Math.min(enemy.health, enemyHP + heal);
+    if (enemyActs && playerHp > 0) {
+      if (Math.random() * 100 < player.dodge) {
+        enemyStreak = 0;
+
+        logs.push({
+          attacker: "enemy",
+          text: "You dodged the enemy.",
+          dodged: true,
+        });
+      } else {
+        enemyStreak++;
+
+        const streakMultiplier =
+          1 + Math.min(0.5, (enemyStreak - 1) * 0.05);
+
+        const adjustedEnemy = {
+          ...enemy,
+          attack: enemy.attack * streakMultiplier,
+        };
+
+        const result = calculateDamage(
+          adjustedEnemy,
+          player,
+          playerHp
+        );
+
+        playerHp -= result.damage;
+
+        logs.push({
+          attacker: "enemy",
+          text: `Enemy hit for ${result.damage}${result.critical ? " CRIT" : ""}.`,
+          damage: result.damage,
+          critical: result.critical,
+        });
+
+        if (player.thorns > 0 && playerHp > 0) {
+          const reflected =
+            Math.max(1, Math.round(result.damage * player.thorns / 100));
+
+          enemyHp -= reflected;
+
+          logs.push({
+            attacker: "player",
+            text: `Your thorns reflected ${reflected}.`,
+            damage: reflected,
+          });
+        }
+      }
+    }
+
+    /*
+     * Regeneration / healing.
+     */
+    if (player.healing > 0 && playerHp > 0) {
+      playerHp = Math.min(
+        player.maxHp,
+        playerHp + player.maxHp * (player.healing / 100)
+      );
+    }
+
+    if (enemy.healing > 0 && enemyHp > 0) {
+      enemyHp = Math.min(
+        enemy.maxHp,
+        enemyHp + enemy.maxHp * (enemy.healing / 100)
+      );
     }
   }
 
+  player.hp = Math.max(0, Math.round(playerHp));
+  enemy.hp = Math.max(0, Math.round(enemyHp));
+
   return {
-    playerWon: playerHP > 0 && enemyHP <= 0,
-    logs,
+    playerWon: playerHp > 0 && enemyHp <= 0,
+    player,
+    enemy,
+    logs: logs.slice(-14),
     turns: turn,
   };
-}
-
-// ============================================================================
-// PERSISTENCE
-// ============================================================================
-
-function defaultGameState(): GameState {
-  return {
-    discovered: [],
-    victories: 0,
-    defeats: 0,
-    bestStreak: 0,
-    currentStreak: 0,
-  };
-}
-
-function loadGameState(): GameState {
-  if (typeof window === "undefined") return defaultGameState();
-
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) return defaultGameState();
-
-    return {
-      ...defaultGameState(),
-      ...JSON.parse(raw),
-    };
-  } catch {
-    return defaultGameState();
-  }
-}
-
-function saveGameState(state: GameState) {
-  if (typeof window === "undefined") return;
-
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Ignore storage failures.
-  }
 }
 
 // ============================================================================
 // FORMAT
 // ============================================================================
 
-function formatNumber(n: number) {
-  if (n < 1000) return Math.round(n).toString();
+function formatNumber(n: number): string {
+  const value = Math.round(n);
+
+  if (Math.abs(value) < 1000) {
+    return value.toString();
+  }
 
   return new Intl.NumberFormat("en-US", {
     notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(n);
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatPercent(n: number): string {
+  return `${Math.round(n)}%`;
 }
 
 // ============================================================================
-// MAIN COMPONENT
+// CARD DESCRIPTION
+// ============================================================================
+
+function CardStatPreview({ card }: { card: Card }) {
+  const items: string[] = [];
+
+  if (card.attack) items.push(`${card.attack > 0 ? "+" : ""}${card.attack} ATK`);
+  if (card.attackMultiplier)
+    items.push(`×${card.attackMultiplier} ATK`);
+  if (card.defense) items.push(`${card.defense > 0 ? "+" : ""}${card.defense} DEF`);
+  if (card.hp) items.push(`${card.hp > 0 ? "+" : ""}${card.hp} HP`);
+  if (card.hpMultiplier)
+    items.push(`×${card.hpMultiplier} HP`);
+  if (card.dodge) items.push(`${card.dodge > 0 ? "+" : ""}${card.dodge}% DODGE`);
+  if (card.crit) items.push(`+${card.crit}% CRIT`);
+  if (card.damageReduction)
+    items.push(`+${card.damageReduction}% REDUCTION`);
+  if (card.armorPen) items.push(`+${card.armorPen}% PEN`);
+  if (card.lifesteal) items.push(`+${card.lifesteal}% LIFESTEAL`);
+  if (card.thorns) items.push(`+${card.thorns}% THORNS`);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 5,
+        marginTop: 8,
+      }}
+    >
+      {items.slice(0, 4).map((item) => (
+        <span
+          key={item}
+          style={{
+            padding: "3px 5px",
+            borderRadius: 3,
+            background: `${COLORS.chrome}12`,
+            color: COLORS.chrome,
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+          }}
+        >
+          {item}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
+// STAT BAR
+// ============================================================================
+
+function StatRow({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        minWidth: 0,
+      }}
+    >
+      <span style={{ opacity: 0.7 }}>{icon}</span>
+
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 8.5,
+          color: COLORS.textMuted,
+          flex: 1,
+        }}
+      >
+        {label}
+      </span>
+
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          fontWeight: 700,
+          color: COLORS.text,
+        }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+// ============================================================================
+// MAIN
 // ============================================================================
 
 export default function PhaserShooter({
@@ -865,263 +1040,192 @@ export default function PhaserShooter({
   onExit,
 }: PhaserShooterProps) {
   const [phase, setPhase] = useState<Phase>("menu");
-  const [gameState, setGameState] = useState<GameState>(() =>
-    defaultGameState()
+  const [hydrated, setHydrated] = useState(false);
+
+  const [saved, setSaved] = useState<SavedState>(() =>
+    defaultSavedState()
   );
 
-  const [enemy, setEnemy] = useState<Enemy | null>(null);
-  const [choices, setChoices] = useState<Item[]>([]);
-  const [selectedItems, setSelectedItems] = useState<Item[]>([]);
-  const [battleResult, setBattleResult] = useState<{
-    won: boolean;
-    logs: BattleLog[];
-    turns: number;
-  } | null>(null);
+  const [round, setRound] = useState(1);
+  const [checkpoint, setCheckpoint] = useState(1);
 
-  const [battleLogIndex, setBattleLogIndex] = useState(0);
-  const [hydrated, setHydrated] = useState(false);
-  const [showEnemyDetails, setShowEnemyDetails] = useState(false);
+  const [playerCards, setPlayerCards] = useState<Card[]>([]);
+  const [choices, setChoices] = useState<Card[]>([]);
+  const [enemy, setEnemy] = useState<Enemy | null>(null);
+
+  const [battleResult, setBattleResult] = useState<ReturnType<
+    typeof simulateBattle
+  > | null>(null);
+
+  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
+
+  const [toast, setToast] = useState<string | null>(null);
 
   const levelInfo = useMemo(
     () => levelFromLifetimeKills(lifetimeKills),
     [lifetimeKills]
   );
 
-  const buildStats = useMemo(
-    () => calculateBuildStats(selectedItems, levelInfo),
-    [selectedItems, levelInfo]
+  const baseStats = useMemo(
+    () => basePlayerStats(levelInfo),
+    [levelInfo]
   );
 
-  const buildElement = useMemo(() => {
-    if (selectedItems.length === 0) return "physical";
-
-    const counts = new Map<Element, number>();
-
-    for (const item of selectedItems) {
-      counts.set(item.element, (counts.get(item.element) ?? 0) + 1);
-    }
-
-    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  }, [selectedItems]);
+  const playerStats = useMemo(
+    () => buildStats(baseStats, playerCards),
+    [baseStats, playerCards]
+  );
 
   // --------------------------------------------------------------------------
   // LOAD
   // --------------------------------------------------------------------------
 
   useEffect(() => {
-    setGameState(loadGameState());
+    setSaved(loadSavedState());
     setHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-
-    saveGameState(gameState);
-  }, [gameState, hydrated]);
+    if (hydrated) {
+      saveSavedState(saved);
+    }
+  }, [saved, hydrated]);
 
   // --------------------------------------------------------------------------
-  // START A NEW EXPERIMENT
+  // NEW RUN
   // --------------------------------------------------------------------------
 
   const startRun = useCallback(() => {
-    const generatedEnemy = generateEnemy(levelInfo.level);
-    const generatedChoices = generateChoices(generatedEnemy);
+    const firstEnemy = generateEnemy(1, levelInfo);
 
-    setEnemy(generatedEnemy);
-    setChoices(generatedChoices);
-    setSelectedItems([]);
+    setRound(1);
+    setCheckpoint(1);
+    setPlayerCards([]);
+    setChoices(shuffle(CARD_POOL).slice(0, 3));
+    setEnemy(firstEnemy);
     setBattleResult(null);
-    setBattleLogIndex(0);
-    setShowEnemyDetails(false);
+    setSelectedCard(null);
 
-    setPhase("build");
-  }, [levelInfo.level]);
+    setSaved((prev) => ({
+      ...prev,
+      totalRuns: prev.totalRuns + 1,
+    }));
+
+    setPhase("draft");
+  }, [levelInfo]);
 
   // --------------------------------------------------------------------------
-  // SELECT ITEM
+  // CHOOSE CARD
   // --------------------------------------------------------------------------
 
-  const toggleItem = useCallback((item: Item) => {
-    setSelectedItems((prev) => {
-      const exists = prev.some((x) => x.id === item.id);
+  const chooseCard = useCallback(
+    (card: Card) => {
+      setSelectedCard(card);
 
-      if (exists) {
-        return prev.filter((x) => x.id !== item.id);
-      }
+      const nextCards = [...playerCards, card];
 
-      // Four slots.
-      if (prev.length >= 4) {
-        return prev;
-      }
+      setPlayerCards(nextCards);
 
-      return [...prev, item];
-    });
-  }, []);
+      /*
+       * Tiny anticipation delay.
+       * The player sees their choice become part of the build before battle.
+       */
+      setTimeout(() => {
+        setPhase("battle");
+      }, 450);
+    },
+    [playerCards]
+  );
 
   // --------------------------------------------------------------------------
   // FIGHT
   // --------------------------------------------------------------------------
 
   const fight = useCallback(() => {
-    if (!enemy || selectedItems.length === 0) return;
+    if (!enemy) return;
 
-    const result = runBattle(
-      buildStats,
-      buildElement,
-      enemy
+    const result = simulateBattle(playerStats, enemy);
+
+    setBattleResult(result);
+    setPhase("result");
+  }, [enemy, playerStats]);
+
+  // --------------------------------------------------------------------------
+  // NEXT ROUND
+  // --------------------------------------------------------------------------
+
+  const nextRound = useCallback(() => {
+    const next = round + 1;
+
+    /*
+     * Checkpoints every 5 rounds.
+     *
+     * The run can keep climbing indefinitely.
+     * Losing later doesn't erase your best reached checkpoint.
+     */
+    const nextCheckpoint =
+      next % 5 === 0 ? next : checkpoint;
+
+    if (next % 5 === 0) {
+      setCheckpoint(next);
+      setToast(`CHECKPOINT ${next} REACHED`);
+    }
+
+    setRound(next);
+
+    const nextEnemy = generateEnemy(next, levelInfo);
+
+    setEnemy(nextEnemy);
+    setChoices(shuffle(CARD_POOL).slice(0, 3));
+    setSelectedCard(null);
+    setBattleResult(null);
+
+    setPhase("draft");
+  }, [round, checkpoint, levelInfo]);
+
+  // --------------------------------------------------------------------------
+  // RETRY FROM CHECKPOINT
+  // --------------------------------------------------------------------------
+
+  const retryCheckpoint = useCallback(() => {
+    const restartRound = checkpoint;
+
+    /*
+     * You keep the cards earned during the current run,
+     * but the enemy is rerolled.
+     *
+     * This creates the "maybe I can beat it with a different
+     * interpretation" feeling.
+     */
+    setRound(restartRound);
+
+    const nextEnemy = generateEnemy(
+      restartRound,
+      levelInfo
     );
 
-    setBattleResult({
-      won: result.playerWon,
-      logs: result.logs,
-      turns: result.turns,
-    });
+    setEnemy(nextEnemy);
+    setChoices(shuffle(CARD_POOL).slice(0, 3));
+    setSelectedCard(null);
+    setBattleResult(null);
 
-    setBattleLogIndex(0);
-
-    const discoveryKey =
-      `${enemy.element}-${enemy.trait}-${selectedItems
-        .map((x) => x.id)
-        .sort()
-        .join("+")}`;
-
-    setGameState((prev) => {
-      const discovered = prev.discovered.includes(discoveryKey)
-        ? prev.discovered
-        : [...prev.discovered, discoveryKey];
-
-      if (result.playerWon) {
-        const currentStreak = prev.currentStreak + 1;
-
-        return {
-          ...prev,
-          discovered,
-          victories: prev.victories + 1,
-          currentStreak,
-          bestStreak: Math.max(prev.bestStreak, currentStreak),
-        };
-      }
-
-      return {
-        ...prev,
-        discovered,
-        defeats: prev.defeats + 1,
-        currentStreak: 0,
-      };
-    });
-
-    setPhase("result");
-  }, [enemy, selectedItems, buildStats, buildElement]);
+    setPhase("draft");
+  }, [checkpoint, levelInfo]);
 
   // --------------------------------------------------------------------------
-  // NEXT LOG
+  // MENU
   // --------------------------------------------------------------------------
 
-  useEffect(() => {
-    if (phase !== "result" || !battleResult) return;
+  if (phase === "menu") {
+    return (
+      <div style={{ position: "relative" }}>
+        <MenuScreen
+          levelInfo={levelInfo}
+          saved={saved}
+          hydrated={hydrated}
+          onStart={startRun}
+        />
 
-    if (battleLogIndex >= battleResult.logs.length - 1) return;
-
-    const timeout = setTimeout(() => {
-      setBattleLogIndex((x) => x + 1);
-    }, 520);
-
-    return () => clearTimeout(timeout);
-  }, [phase, battleResult, battleLogIndex]);
-
-  // --------------------------------------------------------------------------
-  // RENDER
-  // --------------------------------------------------------------------------
-
-  return (
-    <div style={{ position: "relative" }}>
-      <AnimatePresence mode="wait">
-        {phase === "menu" && (
-          <motion.div
-            key="menu"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-          >
-            <MenuScreen
-              levelInfo={levelInfo}
-              gameState={gameState}
-              hydrated={hydrated}
-              onStart={startRun}
-            />
-          </motion.div>
-        )}
-
-        {phase === "build" && enemy && (
-          <motion.div
-            key="build"
-            initial={{ opacity: 0, x: 12 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -12 }}
-          >
-            <BuildScreen
-              levelInfo={levelInfo}
-              enemy={enemy}
-              choices={choices}
-              selectedItems={selectedItems}
-              stats={buildStats}
-              buildElement={buildElement}
-              showEnemyDetails={showEnemyDetails}
-              onToggleItem={toggleItem}
-              onShowEnemy={() =>
-                setShowEnemyDetails((x) => !x)
-              }
-              onFight={fight}
-              onExit={() => setPhase("menu")}
-              onReroll={startRun}
-            />
-          </motion.div>
-        )}
-
-        {phase === "result" && enemy && battleResult && (
-          <motion.div
-            key="result"
-            initial={{ opacity: 0, scale: 0.98 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <ResultScreen
-              enemy={enemy}
-              result={battleResult}
-              logIndex={battleLogIndex}
-              gameState={gameState}
-              onAgain={startRun}
-              onMenu={() => setPhase("menu")}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {phase !== "menu" && (
-        <button
-          onClick={() => setPhase("menu")}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            margin: "18px auto 0",
-            padding: "8px 4px",
-            background: "transparent",
-            border: "none",
-            color: COLORS.textMuted,
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            cursor: "pointer",
-          }}
-        >
-          <X size={12} />
-          Back
-        </button>
-      )}
-
-      {phase === "menu" && (
         <button
           onClick={onExit}
           style={{
@@ -1143,35 +1247,231 @@ export default function PhaserShooter({
           <X size={12} />
           Exit
         </button>
-      )}
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // GAME
+  // --------------------------------------------------------------------------
+
+  return (
+    <div style={{ position: "relative" }}>
+      {/* HEADER */}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+          }}
+        >
+          <Flame size={14} color={COLORS.chrome} />
+
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              color: COLORS.textMuted,
+            }}
+          >
+            RUN {round}
+          </span>
+
+          <span
+            style={{
+              padding: "3px 5px",
+              borderRadius: 3,
+              background: `${COLORS.chrome}15`,
+              color: COLORS.chrome,
+              fontFamily: FONT_MONO,
+              fontSize: 8,
+            }}
+          >
+            CHECKPOINT {checkpoint}
+          </span>
+        </div>
+
+        <button
+          onClick={() => setPhase("menu")}
+          aria-label="Back to menu"
+          style={{
+            width: 30,
+            height: 30,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: 4,
+            border: `1px solid ${COLORS.panelLine}`,
+            background: COLORS.panel,
+            color: COLORS.text,
+            cursor: "pointer",
+          }}
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      {/* LEVEL */}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 12,
+          padding: "8px 10px",
+          borderRadius: 5,
+          border: `1px solid ${COLORS.panelLine}`,
+          background: COLORS.panel,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <Zap size={13} color={COLORS.chrome} />
+
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              color: COLORS.text,
+              fontWeight: 700,
+            }}
+          >
+            LV {levelInfo.level}
+          </span>
+        </div>
+
+        <span
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: COLORS.chrome,
+          }}
+        >
+          ×{levelInfo.powerMultiplier.toFixed(2)} POWER
+        </span>
+      </div>
+
+      <AnimatePresence mode="wait">
+        {phase === "draft" && (
+          <motion.div
+            key="draft"
+            initial={{ opacity: 0, x: 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -12 }}
+          >
+            <DraftScreen
+              round={round}
+              playerStats={playerStats}
+              enemy={enemy}
+              choices={choices}
+              playerCards={playerCards}
+              selectedCard={selectedCard}
+              onChoose={chooseCard}
+            />
+          </motion.div>
+        )}
+
+        {phase === "battle" && enemy && (
+          <motion.div
+            key="battle"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          >
+            <BattlePreview
+              playerStats={playerStats}
+              enemy={enemy}
+              playerCards={playerCards}
+              selectedCard={selectedCard}
+              onFight={fight}
+            />
+          </motion.div>
+        )}
+
+        {phase === "result" && battleResult && enemy && (
+          <motion.div
+            key="result"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+          >
+            <ResultScreen
+              round={round}
+              result={battleResult}
+              enemy={enemy}
+              checkpoint={checkpoint}
+              onNext={nextRound}
+              onRetry={retryCheckpoint}
+              onMenu={() => setPhase("menu")}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            style={{
+              position: "absolute",
+              top: -5,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "8px 14px",
+              borderRadius: 20,
+              background: COLORS.chrome,
+              color: COLORS.void,
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+              zIndex: 20,
+            }}
+          >
+            {toast}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 // ============================================================================
-// MENU
+// MENU SCREEN
 // ============================================================================
 
 function MenuScreen({
   levelInfo,
-  gameState,
+  saved,
   hydrated,
   onStart,
 }: {
   levelInfo: LevelInfo;
-  gameState: GameState;
+  saved: SavedState;
   hydrated: boolean;
   onStart: () => void;
 }) {
-  const xpPct =
-    levelInfo.xpIntoLevel / levelInfo.xpForNextLevel;
-
   return (
     <div>
       <div
         style={{
-          padding: 18,
-          borderRadius: 8,
+          padding: "18px 16px",
+          borderRadius: 7,
           background: COLORS.panel,
           border: `1px solid ${COLORS.panelLine}`,
           marginBottom: 12,
@@ -1180,8 +1480,8 @@ function MenuScreen({
         <div
           style={{
             display: "flex",
-            justifyContent: "space-between",
             alignItems: "center",
+            justifyContent: "space-between",
           }}
         >
           <div
@@ -1191,16 +1491,17 @@ function MenuScreen({
               gap: 8,
             }}
           >
-            <Sparkles size={17} color={COLORS.chrome} />
+            <Brain size={17} color={COLORS.chrome} />
 
             <span
               style={{
                 fontFamily: FONT_DISPLAY,
                 fontWeight: 700,
                 fontSize: 16,
+                color: COLORS.text,
               }}
             >
-              Level {levelInfo.level}
+              Chaos Build
             </span>
           </div>
 
@@ -1208,26 +1509,91 @@ function MenuScreen({
             style={{
               fontFamily: FONT_MONO,
               fontSize: 9,
-              color: COLORS.textMuted,
+              color: COLORS.chrome,
             }}
           >
-            {levelInfo.xpIntoLevel} / {levelInfo.xpForNextLevel}
+            LV {levelInfo.level}
+          </span>
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            lineHeight: 1.6,
+            color: COLORS.textMuted,
+            marginTop: 10,
+          }}
+        >
+          Build a fighter from unpredictable choices.
+          <br />
+          Discover what works. Beat the next thing.
+          <br />
+          <span style={{ color: COLORS.chrome }}>
+            Every enemy is different.
+          </span>
+        </div>
+      </div>
+
+      {/* POWER */}
+
+      <div
+        style={{
+          padding: "14px 16px",
+          borderRadius: 6,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: COLORS.textMuted,
+              textTransform: "uppercase",
+              letterSpacing: 1,
+            }}
+          >
+            Productivity level
+          </span>
+
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              color: COLORS.chrome,
+              fontWeight: 700,
+            }}
+          >
+            ×{levelInfo.powerMultiplier.toFixed(2)}
           </span>
         </div>
 
         <div
           style={{
             height: 5,
-            marginTop: 10,
-            borderRadius: 4,
-            overflow: "hidden",
+            borderRadius: 3,
             background: COLORS.void,
+            marginTop: 8,
+            overflow: "hidden",
           }}
         >
           <div
             style={{
-              width: `${xpPct * 100}%`,
               height: "100%",
+              width: `${
+                (levelInfo.xpIntoLevel /
+                  levelInfo.xpForNextLevel) *
+                100
+              }%`,
               background: COLORS.chrome,
             }}
           />
@@ -1237,95 +1603,42 @@ function MenuScreen({
           style={{
             display: "flex",
             justifyContent: "space-between",
-            marginTop: 12,
+            marginTop: 6,
             fontFamily: FONT_MONO,
-            fontSize: 9,
+            fontSize: 8,
             color: COLORS.textMuted,
           }}
         >
-          <span>COMBAT POWER</span>
+          <span>
+            {levelInfo.xpIntoLevel} / {levelInfo.xpForNextLevel}
+          </span>
 
-          <span style={{ color: COLORS.chrome }}>
-            ×{levelInfo.powerMultiplier.toFixed(2)}
+          <span>
+            Each level = 2 days productivity
           </span>
         </div>
       </div>
 
-      <div
-        style={{
-          padding: 16,
-          borderRadius: 8,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 15,
-          }}
-        >
-          <Brain size={17} color={COLORS.chrome} />
-          UNKNOWN ENCOUNTER
-        </div>
-
-        <p
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10.5,
-            lineHeight: 1.6,
-            color: COLORS.textMuted,
-            margin: "10px 0 0",
-          }}
-        >
-          Every run creates a different enemy, trait,
-          weakness and set of equipment.
-        </p>
-
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            marginTop: 14,
-            flexWrap: "wrap",
-          }}
-        >
-          <Tag icon={<Eye size={11} />} text="Unknown enemy" />
-          <Tag icon={<Crosshair size={11} />} text="Find weakness" />
-          <Tag icon={<Swords size={11} />} text="Build counter" />
-          <Tag icon={<Sparkles size={11} />} text="Unexpected result" />
-        </div>
-      </div>
+      {/* STATS */}
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
+          gridTemplateColumns: "1fr 1fr",
           gap: 8,
-          marginBottom: 14,
+          marginBottom: 12,
         }}
       >
-        <StatMini
-          icon={<Trophy size={13} />}
+        <StatTile
+          icon={<Trophy size={14} />}
+          label="Best round"
+          value={`${saved.bestRound}`}
+        />
+
+        <StatTile
+          icon={<Sword size={14} />}
           label="Wins"
-          value={gameState.victories}
-        />
-
-        <StatMini
-          icon={<Skull size={13} />}
-          label="Losses"
-          value={gameState.defeats}
-        />
-
-        <StatMini
-          icon={<Sparkles size={13} />}
-          label="Discoveries"
-          value={gameState.discovered.length}
+          value={formatNumber(saved.totalWins)}
         />
       </div>
 
@@ -1334,412 +1647,632 @@ function MenuScreen({
         disabled={!hydrated}
         style={{
           width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
           padding: "14px 0",
-          border: "none",
           borderRadius: 5,
+          border: "none",
           background: COLORS.chrome,
           color: COLORS.void,
           fontFamily: FONT_DISPLAY,
           fontWeight: 700,
           fontSize: 13,
+          letterSpacing: 0.7,
+          textTransform: "uppercase",
           cursor: hydrated ? "pointer" : "default",
-          opacity: hydrated ? 1 : 0.6,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 8,
+          opacity: hydrated ? 1 : 0.5,
         }}
       >
         <Play size={14} />
-        DISCOVER WHAT&apos;S NEXT
+        Enter the unknown
       </button>
     </div>
   );
 }
 
 // ============================================================================
-// BUILD SCREEN
+// DRAFT SCREEN
 // ============================================================================
 
-function BuildScreen({
-  levelInfo,
+function DraftScreen({
+  round,
+  playerStats,
   enemy,
   choices,
-  selectedItems,
-  stats,
-  buildElement,
-  showEnemyDetails,
-  onToggleItem,
-  onShowEnemy,
-  onFight,
-  onExit,
-  onReroll,
+  playerCards,
+  selectedCard,
+  onChoose,
 }: {
-  levelInfo: LevelInfo;
-  enemy: Enemy;
-  choices: Item[];
-  selectedItems: Item[];
-  stats: BuildStats;
-  buildElement: Element;
-  showEnemyDetails: boolean;
-  onToggleItem: (item: Item) => void;
-  onShowEnemy: () => void;
-  onFight: () => void;
-  onExit: () => void;
-  onReroll: () => void;
+  round: number;
+  playerStats: Stats;
+  enemy: Enemy | null;
+  choices: Card[];
+  playerCards: Card[];
+  selectedCard: Card | null;
+  onChoose: (card: Card) => void;
 }) {
   return (
     <div>
-      {/* ENEMY */}
+      {/* UNKNOWN HEADER */}
+
       <div
         style={{
-          padding: 15,
-          borderRadius: 8,
-          background: COLORS.panel,
-          border: `1px solid ${ELEMENTS[enemy.element].color}55`,
-          marginBottom: 12,
+          textAlign: "center",
+          marginBottom: 14,
         }}
       >
+        <motion.div
+          animate={{ rotate: [0, -3, 3, 0] }}
+          transition={{
+            duration: 1.8,
+            repeat: Infinity,
+          }}
+        >
+          <Dice5
+            size={24}
+            color={COLORS.chrome}
+            style={{ margin: "0 auto" }}
+          />
+        </motion.div>
+
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 17,
+            color: COLORS.text,
+            marginTop: 7,
+          }}
+        >
+          What happens next?
+        </div>
+
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9.5,
+            color: COLORS.textMuted,
+            marginTop: 3,
+          }}
+        >
+          Choose one. You won't know exactly what the enemy has.
+        </div>
+      </div>
+
+      {/* CURRENT BUILD */}
+
+      <BuildStrip
+        cards={playerCards}
+        stats={playerStats}
+      />
+
+      {/* ENEMY PREVIEW */}
+
+      {enemy && (
+        <div
+          style={{
+            padding: "11px 12px",
+            borderRadius: 6,
+            border: `1px solid ${COLORS.panelLine}`,
+            background: COLORS.panel,
+            marginBottom: 14,
           }}
         >
           <div
             style={{
-              width: 54,
-              height: 54,
-              borderRadius: 10,
               display: "flex",
+              justifyContent: "space-between",
               alignItems: "center",
-              justifyContent: "center",
-              background: `${ELEMENTS[enemy.element].color}16`,
-              fontSize: 30,
             }}
           >
-            {enemy.icon}
+            <div>
+              <div
+                style={{
+                  fontFamily: FONT_DISPLAY,
+                  fontWeight: 700,
+                  fontSize: 13,
+                  color: COLORS.text,
+                }}
+              >
+                {enemy.name}
+              </div>
+
+              <div
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 8.5,
+                  color: COLORS.textMuted,
+                  marginTop: 2,
+                }}
+              >
+                {enemy.title}
+              </div>
+            </div>
+
+            <Eye size={14} color={COLORS.textMuted} />
           </div>
 
-          <div style={{ flex: 1 }}>
-            <div
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr 1fr",
+              gap: 5,
+              marginTop: 9,
+            }}
+          >
+            <MiniStat label="HP" value={formatNumber(enemy.stats.maxHp)} />
+            <MiniStat label="ATK" value={formatNumber(enemy.stats.attack)} />
+            <MiniStat label="DEF" value={formatNumber(enemy.stats.defense)} />
+          </div>
+
+          <div
+            style={{
+              marginTop: 8,
+              fontFamily: FONT_MONO,
+              fontSize: 8,
+              color: COLORS.textMuted,
+            }}
+          >
+            {enemy.cards.length} unknown modifiers equipped
+          </div>
+        </div>
+      )}
+
+      {/* CARDS */}
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          color: COLORS.textMuted,
+          textTransform: "uppercase",
+          letterSpacing: 1.2,
+          marginBottom: 8,
+        }}
+      >
+        Three possible futures
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        {choices.map((card, index) => (
+          <DraftCard
+            key={`${card.id}-${index}`}
+            card={card}
+            number={index + 1}
+            selected={selectedCard?.id === card.id}
+            onClick={() => onChoose(card)}
+          />
+        ))}
+      </div>
+
+      <div
+        style={{
+          marginTop: 12,
+          textAlign: "center",
+          fontFamily: FONT_MONO,
+          fontSize: 8,
+          color: COLORS.textMuted,
+        }}
+      >
+        There is no perfect choice.
+        <br />
+        <span style={{ color: COLORS.chrome }}>
+          Find out.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// DRAFT CARD
+// ============================================================================
+
+function DraftCard({
+  card,
+  number,
+  selected,
+  onClick,
+}: {
+  card: Card;
+  number: number;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <motion.button
+      whileHover={{ scale: 1.01 }}
+      whileTap={{ scale: 0.985 }}
+      onClick={onClick}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        padding: "13px 12px",
+        borderRadius: 6,
+        border: `1px solid ${
+          selected ? COLORS.chrome : COLORS.panelLine
+        }`,
+        background: selected
+          ? `${COLORS.chrome}10`
+          : COLORS.panel,
+        cursor: "pointer",
+        color: COLORS.text,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          alignItems: "flex-start",
+        }}
+      >
+        <div
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 5,
+            background: `${COLORS.chrome}14`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 18,
+            flexShrink: 0,
+          }}
+        >
+          {card.icon}
+        </div>
+
+        <div style={{ flex: 1 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+            }}
+          >
+            <span
               style={{
                 fontFamily: FONT_DISPLAY,
                 fontWeight: 700,
-                fontSize: 16,
+                fontSize: 13,
               }}
             >
-              {enemy.name}
-            </div>
+              {card.name}
+            </span>
 
-            <div
+            <span
               style={{
                 fontFamily: FONT_MONO,
-                fontSize: 9,
-                color: COLORS.textMuted,
-                marginTop: 3,
+                fontSize: 7.5,
+                color: COLORS.chrome,
               }}
             >
-              {enemy.title}
-            </div>
-
-            <div
-              style={{
-                marginTop: 7,
-                fontFamily: FONT_MONO,
-                fontSize: 10,
-                color: ELEMENTS[enemy.element].color,
-              }}
-            >
-              {ELEMENTS[enemy.element].icon}{" "}
-              {ELEMENTS[enemy.element].label}
-            </div>
+              {card.category}
+            </span>
           </div>
 
-          <button
-            onClick={onShowEnemy}
+          <div
             style={{
-              width: 34,
-              height: 34,
-              borderRadius: 6,
-              border: `1px solid ${COLORS.panelLine}`,
-              background: COLORS.void,
-              color: COLORS.text,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: COLORS.textMuted,
+              lineHeight: 1.45,
+              marginTop: 3,
             }}
           >
-            <Eye size={14} />
-          </button>
+            {card.description}
+          </div>
+
+          <CardStatPreview card={card} />
         </div>
 
-        <AnimatePresence>
-          {showEnemyDetails && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              style={{
-                overflow: "hidden",
-                marginTop: 12,
-                paddingTop: 12,
-                borderTop: `1px solid ${COLORS.panelLine}`,
-              }}
-            >
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 7,
-                }}
-              >
-                <EnemyFact
-                  label="Trait"
-                  value={enemy.trait}
-                />
-
-                <EnemyFact
-                  label="Weakness"
-                  value={`${ELEMENTS[enemy.weakness].icon} ${ELEMENTS[enemy.weakness].label}`}
-                  good
-                />
-
-                <EnemyFact
-                  label="Resistance"
-                  value={`${ELEMENTS[enemy.resistance].icon} ${ELEMENTS[enemy.resistance].label}`}
-                />
-
-                <EnemyFact
-                  label="Behavior"
-                  value={enemy.description}
-                />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div
+          style={{
+            width: 20,
+            height: 20,
+            borderRadius: "50%",
+            border: `1px solid ${COLORS.panelLine}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+            color: COLORS.textMuted,
+            flexShrink: 0,
+          }}
+        >
+          {number}
+        </div>
       </div>
+    </motion.button>
+  );
+}
 
-      {/* BUILD HEADER */}
+// ============================================================================
+// BUILD STRIP
+// ============================================================================
+
+function BuildStrip({
+  cards,
+  stats,
+}: {
+  cards: Card[];
+  stats: Stats;
+}) {
+  return (
+    <div
+      style={{
+        padding: "10px",
+        borderRadius: 6,
+        background: COLORS.panel,
+        border: `1px solid ${COLORS.panelLine}`,
+        marginBottom: 10,
+      }}
+    >
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginBottom: 9,
+          marginBottom: 8,
         }}
       >
-        <div
+        <span
           style={{
             fontFamily: FONT_MONO,
-            fontSize: 10,
-            letterSpacing: 1.2,
+            fontSize: 8,
             color: COLORS.textMuted,
             textTransform: "uppercase",
+            letterSpacing: 1,
           }}
         >
-          Choose your experiment
-        </div>
+          Your build
+        </span>
 
-        <div
+        <span
           style={{
             fontFamily: FONT_MONO,
-            fontSize: 9,
+            fontSize: 8,
             color: COLORS.chrome,
           }}
         >
-          {selectedItems.length}/4 equipped
-        </div>
+          {cards.length} effects
+        </span>
       </div>
 
-      {/* ITEMS */}
       <div
         style={{
-          display: "flex",
-          flexDirection: "column",
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          gap: 5,
+        }}
+      >
+        <MiniStat label="HP" value={formatNumber(stats.maxHp)} />
+        <MiniStat label="ATK" value={formatNumber(stats.attack)} />
+        <MiniStat label="DEF" value={formatNumber(stats.defense)} />
+        <MiniStat label="DODGE" value={formatPercent(stats.dodge)} />
+        <MiniStat label="CRIT" value={formatPercent(stats.crit)} />
+        <MiniStat label="REDUCE" value={formatPercent(stats.damageReduction)} />
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// BATTLE PREVIEW
+// ============================================================================
+
+function BattlePreview({
+  playerStats,
+  enemy,
+  playerCards,
+  selectedCard,
+  onFight,
+}: {
+  playerStats: Stats;
+  enemy: Enemy;
+  playerCards: Card[];
+  selectedCard: Card | null;
+  onFight: () => void;
+}) {
+  return (
+    <div>
+      {/* VERSUS */}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 38px 1fr",
           gap: 7,
+          alignItems: "center",
+          marginBottom: 12,
         }}
       >
-        {choices.map((item) => {
-          const selected = selectedItems.some(
-            (x) => x.id === item.id
-          );
+        <Combatant
+          title="YOU"
+          hp={playerStats.maxHp}
+          attack={playerStats.attack}
+          defense={playerStats.defense}
+          icon={<Sword size={15} />}
+        />
 
-          return (
-            <ItemCard
-              key={item.id}
-              item={item}
-              selected={selected}
-              onClick={() => onToggleItem(item)}
-            />
-          );
-        })}
-      </div>
-
-      {/* BUILD STATS */}
-      <div
-        style={{
-          marginTop: 12,
-          padding: 12,
-          borderRadius: 7,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-        }}
-      >
         <div
           style={{
+            width: 34,
+            height: 34,
+            borderRadius: "50%",
+            background: COLORS.chrome,
+            color: COLORS.void,
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 9,
+            justifyContent: "center",
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 800,
+            fontSize: 10,
           }}
         >
-          <span
+          VS
+        </div>
+
+        <Combatant
+          title={enemy.name}
+          hp={enemy.stats.maxHp}
+          attack={enemy.stats.attack}
+          defense={enemy.stats.defense}
+          icon={<Skull size={15} />}
+        />
+      </div>
+
+      {/* SELECTED */}
+
+      {selectedCard && (
+        <div
+          style={{
+            padding: "9px 11px",
+            borderRadius: 5,
+            background: `${COLORS.chrome}0d`,
+            border: `1px solid ${COLORS.chrome}33`,
+            marginBottom: 12,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 8,
+              color: COLORS.textMuted,
+              textTransform: "uppercase",
+            }}
+          >
+            You chose
+          </div>
+
+          <div
             style={{
               fontFamily: FONT_DISPLAY,
               fontWeight: 700,
               fontSize: 12,
+              color: COLORS.chrome,
+              marginTop: 3,
             }}
           >
-            Your build
-          </span>
+            {selectedCard.icon} {selectedCard.name}
+          </div>
+        </div>
+      )}
 
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              color: ELEMENTS[buildElement].color,
-            }}
-          >
-            {ELEMENTS[buildElement].icon}{" "}
-            {ELEMENTS[buildElement].label}
-          </span>
+      {/* BUILD */}
+
+      <div
+        style={{
+          padding: 12,
+          borderRadius: 6,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+            color: COLORS.textMuted,
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            marginBottom: 8,
+          }}
+        >
+          Final matchup
         </div>
 
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: 6,
+            gridTemplateColumns: "1fr 1fr",
+            gap: 7,
           }}
         >
-          <CombatStat
-            icon={<Sword size={12} />}
-            label="ATK"
-            value={stats.attack}
-          />
-
-          <CombatStat
-            icon={<Shield size={12} />}
-            label="DEF"
-            value={stats.defense}
-          />
-
-          <CombatStat
-            icon={<Heart size={12} />}
+          <StatRow
+            icon={<Heart size={11} />}
             label="HP"
-            value={stats.health}
+            value={formatNumber(playerStats.maxHp)}
           />
 
-          <CombatStat
-            icon={<Zap size={12} />}
-            label="SPD"
-            value={stats.speed}
+          <StatRow
+            icon={<Sword size={11} />}
+            label="Attack"
+            value={formatNumber(playerStats.attack)}
           />
 
-          <CombatStat
-            icon={<Crosshair size={12} />}
-            label="CRIT"
-            value={`${Math.round(stats.crit)}%`}
+          <StatRow
+            icon={<Shield size={11} />}
+            label="Defense"
+            value={formatNumber(playerStats.defense)}
           />
 
-          <CombatStat
-            icon={<Flame size={12} />}
-            label="DRAIN"
-            value={`${Math.round(stats.lifesteal)}%`}
+          <StatRow
+            icon={<Sparkles size={11} />}
+            label="Dodge"
+            value={formatPercent(playerStats.dodge)}
+          />
+
+          <StatRow
+            icon={<Flame size={11} />}
+            label="Crit"
+            value={formatPercent(playerStats.crit)}
+          />
+
+          <StatRow
+            icon={<Shield size={11} />}
+            label="Reduction"
+            value={formatPercent(playerStats.damageReduction)}
           />
         </div>
       </div>
 
-      {/* ACTIONS */}
-      <div
-        style={{
-          display: "flex",
-          gap: 7,
-          marginTop: 12,
-        }}
-      >
-        <button
-          onClick={onReroll}
-          style={{
-            width: 42,
-            borderRadius: 5,
-            border: `1px solid ${COLORS.panelLine}`,
-            background: COLORS.panel,
-            color: COLORS.textMuted,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            cursor: "pointer",
-          }}
-          title="Generate another encounter"
-        >
-          <RefreshCw size={14} />
-        </button>
-
-        <button
-          onClick={onFight}
-          disabled={selectedItems.length === 0}
-          style={{
-            flex: 1,
-            padding: "13px 0",
-            border: "none",
-            borderRadius: 5,
-            background:
-              selectedItems.length > 0
-                ? COLORS.chrome
-                : COLORS.panelLine,
-            color:
-              selectedItems.length > 0
-                ? COLORS.void
-                : COLORS.textMuted,
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 13,
-            cursor:
-              selectedItems.length > 0
-                ? "pointer"
-                : "not-allowed",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-          }}
-        >
-          <Swords size={15} />
-          FIGHT
-          <ChevronRight size={14} />
-        </button>
-      </div>
-
       <button
-        onClick={onExit}
+        onClick={onFight}
         style={{
           width: "100%",
-          marginTop: 8,
-          padding: "8px 0",
-          background: "transparent",
+          padding: "14px 0",
+          borderRadius: 5,
           border: "none",
-          color: COLORS.textMuted,
-          fontFamily: FONT_MONO,
-          fontSize: 9,
+          background: COLORS.chrome,
+          color: COLORS.void,
+          fontFamily: FONT_DISPLAY,
+          fontWeight: 800,
+          fontSize: 13,
+          letterSpacing: 0.8,
+          textTransform: "uppercase",
           cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7,
         }}
       >
-        Abandon experiment
+        <Sword size={14} />
+        Fight
       </button>
+
+      <div
+        style={{
+          textAlign: "center",
+          fontFamily: FONT_MONO,
+          fontSize: 8,
+          color: COLORS.textMuted,
+          marginTop: 8,
+        }}
+      >
+        No undo. See what happens.
+      </div>
     </div>
   );
 }
@@ -1749,185 +2282,267 @@ function BuildScreen({
 // ============================================================================
 
 function ResultScreen({
-  enemy,
+  round,
   result,
-  logIndex,
-  gameState,
-  onAgain,
+  enemy,
+  checkpoint,
+  onNext,
+  onRetry,
   onMenu,
 }: {
+  round: number;
+  result: ReturnType<typeof simulateBattle>;
   enemy: Enemy;
-  result: {
-    won: boolean;
-    logs: BattleLog[];
-    turns: number;
-  };
-  logIndex: number;
-  gameState: GameState;
-  onAgain: () => void;
+  checkpoint: number;
+  onNext: () => void;
+  onRetry: () => void;
   onMenu: () => void;
 }) {
-  const visibleLogs = result.logs.slice(
-    0,
-    Math.min(logIndex + 1, result.logs.length)
-  );
+  const won = result.playerWon;
 
   return (
     <div>
-      <motion.div
-        initial={{ scale: 0.92, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
+      <div
         style={{
           textAlign: "center",
-          padding: "22px 12px",
-          borderRadius: 8,
-          background: COLORS.panel,
-          border: `1px solid ${
-            result.won ? "#7fd48a55" : "#ff795f55"
-          }`,
+          padding: "15px 0 13px",
         }}
       >
-        <div
-          style={{
-            fontSize: 42,
-            marginBottom: 8,
-          }}
+        <motion.div
+          initial={{ scale: 0.5, rotate: -20 }}
+          animate={{ scale: 1, rotate: 0 }}
         >
-          {result.won ? "🏆" : "💥"}
-        </div>
+          {won ? (
+            <Trophy
+              size={32}
+              color={COLORS.chrome}
+              style={{ margin: "0 auto" }}
+            />
+          ) : (
+            <Skull
+              size={32}
+              color={COLORS.textMuted}
+              style={{ margin: "0 auto" }}
+            />
+          )}
+        </motion.div>
 
         <div
           style={{
             fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
+            fontWeight: 800,
             fontSize: 20,
-            color: result.won ? "#7fd48a" : "#ff795f",
+            color: COLORS.text,
+            marginTop: 8,
           }}
         >
-          {result.won ? "YOU WON" : "YOU LOST"}
+          {won ? "YOU WON" : "YOU LOST"}
         </div>
 
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            color: COLORS.textMuted,
-            marginTop: 5,
-          }}
-        >
-          {result.turns} turns against {enemy.name}
-        </div>
-      </motion.div>
-
-      {/* BATTLE LOG */}
-      <div
-        style={{
-          marginTop: 12,
-          padding: 13,
-          borderRadius: 8,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-          minHeight: 155,
-        }}
-      >
         <div
           style={{
             fontFamily: FONT_MONO,
             fontSize: 9,
-            textTransform: "uppercase",
-            letterSpacing: 1.2,
             color: COLORS.textMuted,
-            marginBottom: 9,
+            marginTop: 3,
           }}
         >
-          Battle discovery
+          Round {round} · {result.turns} turns
         </div>
-
-        <AnimatePresence initial={false}>
-          {visibleLogs.slice(-7).map((log, index) => (
-            <motion.div
-              key={`${logIndex}-${index}-${log.text}`}
-              initial={{ opacity: 0, x: -5 }}
-              animate={{ opacity: 1, x: 0 }}
-              style={{
-                fontFamily: FONT_MONO,
-                fontSize: 9.5,
-                lineHeight: 1.55,
-                padding: "4px 0",
-                color:
-                  log.type === "critical"
-                    ? "#e5c75f"
-                    : log.type === "good"
-                    ? "#7fd48a"
-                    : log.type === "bad"
-                    ? "#ff795f"
-                    : COLORS.textMuted,
-              }}
-            >
-              {log.text}
-            </motion.div>
-          ))}
-        </AnimatePresence>
       </div>
 
-      {/* RESULT INSIGHT */}
-      <div
-        style={{
-          marginTop: 10,
-          padding: 13,
-          borderRadius: 7,
-          background: COLORS.panel,
-          border: `1px solid ${COLORS.panelLine}`,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 12,
-          }}
-        >
-          <Brain size={14} color={COLORS.chrome} />
-          WHAT DID YOU LEARN?
-        </div>
-
-        <div
-          style={{
-            marginTop: 8,
-            fontFamily: FONT_MONO,
-            fontSize: 9.5,
-            color: COLORS.textMuted,
-            lineHeight: 1.6,
-          }}
-        >
-          {result.won
-            ? "That combination worked. But was it the best possible combination? The next enemy may completely change the answer."
-            : "Your build failed this matchup. Change one variable, try a different counter, and see what changes."}
-        </div>
-      </div>
+      {/* FINAL HP */}
 
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "1fr 1fr",
           gap: 8,
-          marginTop: 10,
+          marginBottom: 10,
         }}
       >
-        <button
-          onClick={onAgain}
+        <ResultStat
+          label="Your HP"
+          value={formatNumber(result.player.hp)}
+          sub={`/${formatNumber(result.player.maxHp)}`}
+        />
+
+        <ResultStat
+          label="Enemy HP"
+          value={formatNumber(result.enemy.hp)}
+          sub={`/${formatNumber(result.enemy.maxHp)}`}
+        />
+      </div>
+
+      {/* BATTLE LOG */}
+
+      <div
+        style={{
+          padding: "10px",
+          borderRadius: 6,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 10,
+        }}
+      >
+        <div
           style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+            color: COLORS.textMuted,
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            marginBottom: 7,
+          }}
+        >
+          <Eye size={11} />
+          What happened
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {result.logs.map((log, index) => (
+            <div
+              key={index}
+              style={{
+                display: "flex",
+                gap: 7,
+                alignItems: "center",
+                fontFamily: FONT_MONO,
+                fontSize: 8.5,
+                color:
+                  log.attacker === "player"
+                    ? COLORS.text
+                    : COLORS.textMuted,
+              }}
+            >
+              <span
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: "50%",
+                  background:
+                    log.attacker === "player"
+                      ? COLORS.chrome
+                      : COLORS.textMuted,
+                  flexShrink: 0,
+                }}
+              />
+
+              <span style={{ flex: 1 }}>{log.text}</span>
+
+              {log.damage && (
+                <span
+                  style={{
+                    color: log.critical
+                      ? COLORS.chrome
+                      : COLORS.textMuted,
+                    fontWeight: log.critical ? 800 : 400,
+                  }}
+                >
+                  -{formatNumber(log.damage)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ENEMY REVEAL */}
+
+      <div
+        style={{
+          padding: "11px 12px",
+          borderRadius: 6,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.panelLine}`,
+          marginBottom: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontFamily: FONT_DISPLAY,
+                fontWeight: 700,
+                fontSize: 12,
+                color: COLORS.text,
+              }}
+            >
+              {enemy.name}
+            </div>
+
+            <div
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 8,
+                color: COLORS.textMuted,
+                marginTop: 2,
+              }}
+            >
+              Enemy build revealed
+            </div>
+          </div>
+
+          <Eye size={14} color={COLORS.chrome} />
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 4,
+            marginTop: 8,
+          }}
+        >
+          {enemy.cards.map((card, index) => (
+            <span
+              key={`${card.id}-${index}`}
+              style={{
+                padding: "4px 6px",
+                borderRadius: 3,
+                background: `${COLORS.chrome}10`,
+                border: `1px solid ${COLORS.panelLine}`,
+                fontFamily: FONT_MONO,
+                fontSize: 7.5,
+                color: COLORS.textMuted,
+              }}
+            >
+              {card.icon} {card.name}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {won ? (
+        <button
+          onClick={onNext}
+          style={{
+            width: "100%",
             padding: "13px 0",
             borderRadius: 5,
             border: "none",
             background: COLORS.chrome,
             color: COLORS.void,
             fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 11,
+            fontWeight: 800,
+            fontSize: 12,
+            letterSpacing: 0.7,
+            textTransform: "uppercase",
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
@@ -1935,214 +2550,55 @@ function ResultScreen({
             gap: 6,
           }}
         >
-          <RotateCcw size={13} />
-          TRY SOMETHING ELSE
+          <ChevronRight size={15} />
+          See what&apos;s next
         </button>
-
-        <button
-          onClick={onMenu}
-          style={{
-            padding: "13px 0",
-            borderRadius: 5,
-            border: `1px solid ${COLORS.panelLine}`,
-            background: COLORS.panel,
-            color: COLORS.text,
-            fontFamily: FONT_DISPLAY,
-            fontWeight: 700,
-            fontSize: 11,
-            cursor: "pointer",
-          }}
-        >
-          MENU
-        </button>
-      </div>
-
-      <div
-        style={{
-          textAlign: "center",
-          marginTop: 10,
-          fontFamily: FONT_MONO,
-          fontSize: 8.5,
-          color: COLORS.textMuted,
-        }}
-      >
-        {gameState.victories} wins · {gameState.defeats} losses ·{" "}
-        {gameState.discovered.length} discoveries
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// ITEM CARD
-// ============================================================================
-
-function ItemCard({
-  item,
-  selected,
-  onClick,
-}: {
-  item: Item;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  const element = ELEMENTS[item.element];
-
-  return (
-    <motion.button
-      whileTap={{ scale: 0.985 }}
-      onClick={onClick}
-      style={{
-        width: "100%",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "11px 12px",
-        borderRadius: 7,
-        border: `1px solid ${
-          selected ? element.color : COLORS.panelLine
-        }`,
-        background: selected
-          ? `${element.color}12`
-          : COLORS.panel,
-        textAlign: "left",
-        cursor: "pointer",
-        opacity: selected ? 1 : 0.92,
-      }}
-    >
-      <div
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 7,
-          background: `${element.color}15`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 20,
-          flexShrink: 0,
-        }}
-      >
-        {item.icon}
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-          }}
-        >
-          <span
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+          <button
+            onClick={onRetry}
             style={{
-              fontFamily: FONT_DISPLAY,
-              fontWeight: 700,
-              fontSize: 12,
-              color: COLORS.text,
-            }}
-          >
-            {item.name}
-          </span>
-
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 7.5,
-              textTransform: "uppercase",
-              color: element.color,
-            }}
-          >
-            {item.rarity}
-          </span>
-        </div>
-
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 8.5,
-            lineHeight: 1.4,
-            color: COLORS.textMuted,
-            marginTop: 3,
-          }}
-        >
-          {item.description}
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            marginTop: 5,
-            flexWrap: "wrap",
-            fontFamily: FONT_MONO,
-            fontSize: 8,
-          }}
-        >
-          {item.attack !== 0 && (
-            <span>
-              ⚔ {item.attack > 0 ? "+" : ""}
-              {item.attack}
-            </span>
-          )}
-
-          {item.defense !== 0 && (
-            <span>
-              🛡 {item.defense > 0 ? "+" : ""}
-              {item.defense}
-            </span>
-          )}
-
-          {item.health !== 0 && (
-            <span>
-              ♥ {item.health > 0 ? "+" : ""}
-              {item.health}
-            </span>
-          )}
-
-          {item.speed !== 0 && (
-            <span>
-              ⚡ {item.speed > 0 ? "+" : ""}
-              {item.speed}
-            </span>
-          )}
-
-          {item.crit > 0 && (
-            <span>
-              ✦ +{item.crit}%
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div
-        style={{
-          width: 20,
-          height: 20,
-          borderRadius: "50%",
-          border: `1px solid ${
-            selected ? element.color : COLORS.panelLine
-          }`,
-          background: selected ? element.color : "transparent",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        {selected && (
-          <span
-            style={{
+              width: "100%",
+              padding: "13px 0",
+              borderRadius: 5,
+              border: "none",
+              background: COLORS.chrome,
               color: COLORS.void,
-              fontSize: 11,
-              fontWeight: 900,
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 800,
+              fontSize: 12,
+              letterSpacing: 0.7,
+              textTransform: "uppercase",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
             }}
           >
-            ✓
-          </span>
-        )}
-      </div>
-    </motion.button>
+            <RefreshCw size={14} />
+            Reroll from checkpoint {checkpoint}
+          </button>
+
+          <button
+            onClick={onMenu}
+            style={{
+              width: "100%",
+              padding: "11px 0",
+              borderRadius: 5,
+              border: `1px solid ${COLORS.panelLine}`,
+              background: COLORS.panel,
+              color: COLORS.textMuted,
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              cursor: "pointer",
+            }}
+          >
+            End run
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2150,49 +2606,20 @@ function ItemCard({
 // SMALL COMPONENTS
 // ============================================================================
 
-function Tag({
-  icon,
-  text,
-}: {
-  icon: React.ReactNode;
-  text: string;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "5px 7px",
-        borderRadius: 4,
-        background: COLORS.void,
-        border: `1px solid ${COLORS.panelLine}`,
-        fontFamily: FONT_MONO,
-        fontSize: 8,
-        color: COLORS.textMuted,
-      }}
-    >
-      {icon}
-      {text}
-    </div>
-  );
-}
-
-function StatMini({
+function StatTile({
   icon,
   label,
   value,
 }: {
   icon: React.ReactNode;
   label: string;
-  value: number;
+  value: string;
 }) {
   return (
     <div
       style={{
-        padding: "10px 5px",
-        textAlign: "center",
-        borderRadius: 6,
+        padding: "11px 12px",
+        borderRadius: 5,
         background: COLORS.panel,
         border: `1px solid ${COLORS.panelLine}`,
       }}
@@ -2200,54 +2627,61 @@ function StatMini({
       <div
         style={{
           display: "flex",
-          justifyContent: "center",
+          alignItems: "center",
+          gap: 6,
           color: COLORS.chrome,
         }}
       >
         {icon}
-      </div>
 
-      <div
-        style={{
-          fontFamily: FONT_DISPLAY,
-          fontWeight: 700,
-          fontSize: 14,
-          marginTop: 3,
-        }}
-      >
-        {value}
+        <span
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 8,
+            color: COLORS.textMuted,
+            textTransform: "uppercase",
+          }}
+        >
+          {label}
+        </span>
       </div>
 
       <div
         style={{
           fontFamily: FONT_MONO,
-          fontSize: 7.5,
-          color: COLORS.textMuted,
-          textTransform: "uppercase",
+          fontSize: 15,
+          fontWeight: 700,
+          color: COLORS.text,
+          marginTop: 5,
         }}
       >
-        {label}
+        {value}
       </div>
     </div>
   );
 }
 
-function EnemyFact({
+function MiniStat({
   label,
   value,
-  good,
 }: {
   label: string;
   value: string;
-  good?: boolean;
 }) {
   return (
-    <div>
+    <div
+      style={{
+        padding: "6px",
+        borderRadius: 3,
+        background: COLORS.void,
+        border: `1px solid ${COLORS.panelLine}`,
+        minWidth: 0,
+      }}
+    >
       <div
         style={{
           fontFamily: FONT_MONO,
-          fontSize: 7.5,
-          textTransform: "uppercase",
+          fontSize: 7,
           color: COLORS.textMuted,
         }}
       >
@@ -2258,8 +2692,9 @@ function EnemyFact({
         style={{
           fontFamily: FONT_MONO,
           fontSize: 9,
-          marginTop: 3,
-          color: good ? "#7fd48a" : COLORS.text,
+          color: COLORS.text,
+          fontWeight: 700,
+          marginTop: 2,
         }}
       >
         {value}
@@ -2268,56 +2703,133 @@ function EnemyFact({
   );
 }
 
-function CombatStat({
+function Combatant({
+  title,
+  hp,
+  attack,
+  defense,
   icon,
-  label,
-  value,
 }: {
+  title: string;
+  hp: number;
+  attack: number;
+  defense: number;
   icon: React.ReactNode;
-  label: string;
-  value: number | string;
 }) {
   return (
     <div
       style={{
-        padding: "7px 6px",
-        borderRadius: 5,
-        background: COLORS.void,
+        padding: "10px",
+        borderRadius: 6,
+        background: COLORS.panel,
+        border: `1px solid ${COLORS.panelLine}`,
+        minWidth: 0,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          color: COLORS.chrome,
+        }}
+      >
+        {icon}
+
+        <span
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontSize: 9,
+            fontWeight: 700,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {title}
+        </span>
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 15,
+          fontWeight: 700,
+          color: COLORS.text,
+          marginTop: 6,
+        }}
+      >
+        {formatNumber(hp)}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          marginTop: 3,
+          fontFamily: FONT_MONO,
+          fontSize: 7.5,
+          color: COLORS.textMuted,
+        }}
+      >
+        <span>ATK {formatNumber(attack)}</span>
+        <span>DEF {formatNumber(defense)}</span>
+      </div>
+    </div>
+  );
+}
+
+function ResultStat({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div
+      style={{
+        padding: "12px",
+        borderRadius: 6,
+        background: COLORS.panel,
         border: `1px solid ${COLORS.panelLine}`,
         textAlign: "center",
       }}
     >
       <div
         style={{
-          display: "flex",
-          justifyContent: "center",
-          color: COLORS.chrome,
-        }}
-      >
-        {icon}
-      </div>
-
-      <div
-        style={{
           fontFamily: FONT_MONO,
-          fontSize: 10,
-          fontWeight: 700,
-          marginTop: 2,
-        }}
-      >
-        {typeof value === "number"
-          ? formatNumber(value)
-          : value}
-      </div>
-
-      <div
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 7,
+          fontSize: 8,
           color: COLORS.textMuted,
+          textTransform: "uppercase",
         }}
       >
         {label}
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 17,
+          fontWeight: 700,
+          color: COLORS.text,
+          marginTop: 4,
+        }}
+      >
+        {value}
+      </div>
+
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 7.5,
+          color: COLORS.textMuted,
+          marginTop: 1,
+        }}
+      >
+        {sub}
       </div>
     </div>
   );
